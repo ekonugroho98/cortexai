@@ -1,0 +1,62 @@
+{
+  "host": "0.0.0.0",
+  "port": 8000,
+  "environment": "development",
+  "api_prefix": "/api/v1",
+  "log_level": "info",
+
+  "cors_origins": [
+    "http://localhost:3000",
+    "http://localhost:8080"
+  ],
+
+  "api_key_header": "X-API-Key",
+  "api_keys": [
+    "your-api-key-here"
+  ],
+  "enable_auth": true,
+  "rate_limit_per_minute": 60,
+
+  "gcp_project_id": "your-gcp-project-id",
+  "google_application_credentials": "/path/to/service-account.json",
+  "bigquery_location": "US",
+
+  "enable_row_level_security": true,
+  "max_query_bytes_processed": 10000000000,
+  "enable_query_cost_tracking": true,
+  "enable_data_masking": true,
+  "enable_pii_detection": true,
+  "enable_audit_logging": true,
+  "sensitive_columns": [
+    "email", "phone", "ssn", "social_security_number",
+    "credit_card", "password", "secret", "token",
+    "api_key", "access_key", "private_key"
+  ],
+  "pii_keywords": [
+    "password", "ssn", "social security", "credit card",
+    "bank account", "pin", "secret", "private key",
+    "access token", "api key", "personal data"
+  ],
+
+  "anthropic_api_key": "sk-ant-your-key-here",
+  "agent_timeout": 300,
+  "model_list": {
+    "anthropic": "claude-sonnet-4-6"
+  },
+
+  "elasticsearch_enabled": false,
+  "elasticsearch_host": "localhost",
+  "elasticsearch_port": 9200,
+  "elasticsearch_scheme": "http",
+  "elasticsearch_user": "",
+  "elasticsearch_password": "",
+  "elasticsearch_verify_certs": true,
+  "elasticsearch_max_retries": 3,
+  "elasticsearch_timeout": 30,
+
+  "es_allowed_patterns": [
+    "hc-upg-k8s-prd-*",
+    "hc-upg-k8s-staging-*",
+    "hc-upg-k8s-dev-*"
+  ]
+}

@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cortexai-config
+  namespace: cortexai  # FIX #10
+data:
+  CORTEXAI_ENV: "production"
+  CORTEXAI_PORT: "8000"
+  CORTEXAI_LOG_LEVEL: "info"
+  GCP_PROJECT_ID: "your-gcp-project-id"
+  BIGQUERY_LOCATION: "US"
+  ELASTICSEARCH_ENABLED: "false"
+  ELASTICSEARCH_HOST: "elasticsearch"
+  ELASTICSEARCH_PORT: "9200"
+  ELASTICSEARCH_SCHEME: "http"
+  RATE_LIMIT_PER_MINUTE: "60"
+  ENABLE_AUTH: "true"
+  MAX_QUERY_BYTES_PROCESSED: "10000000000"

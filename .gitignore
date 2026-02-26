@@ -1,0 +1,49 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+cortexai
+
+# Test coverage
+*.out
+coverage.html
+
+# Config with real credentials (use example files instead)
+config/cortexai.json
+config/*.json
+!config/cortexai.example.json
+
+# GCP service account credentials
+credentials/
+credentials.json
+*.json.key
+service-account*.json
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor (if not committing vendor dir)
+# vendor/
+
+# Docker build artifacts
+.docker/
+
+# K8s secrets (never commit real secrets)
+deploy/k8s/secret-prod.yaml
+deploy/k8s/secret-staging.yaml
