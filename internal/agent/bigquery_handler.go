@@ -16,8 +16,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-const schemaCacheTTL = 5 * time.Minute
-
 // schemaCache holds pre-built system prompts keyed by dataset ID.
 type schemaCacheEntry struct {
 	prompt    string
@@ -27,11 +25,15 @@ type schemaCacheEntry struct {
 type schemaCache struct {
 	mu    sync.RWMutex
 	store map[string]schemaCacheEntry
+	ttl   time.Duration
 	sf    singleflight.Group // deduplicate concurrent fetches for the same dataset
 }
 
-func newSchemaCache() *schemaCache {
-	return &schemaCache{store: make(map[string]schemaCacheEntry)}
+func newSchemaCache(ttl time.Duration) *schemaCache {
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	return &schemaCache{store: make(map[string]schemaCacheEntry), ttl: ttl}
 }
 
 func (c *schemaCache) get(datasetID string) (string, bool) {
@@ -49,7 +51,7 @@ func (c *schemaCache) set(datasetID, prompt string) {
 	defer c.mu.Unlock()
 	c.store[datasetID] = schemaCacheEntry{
 		prompt:    prompt,
-		expiresAt: time.Now().Add(schemaCacheTTL),
+		expiresAt: time.Now().Add(c.ttl),
 	}
 }
 
@@ -59,7 +61,9 @@ func (c *schemaCache) invalidate(datasetID string) {
 	delete(c.store, datasetID)
 }
 
-const baseSystemPrompt = `You are CortexAI, an expert data analyst with deep knowledge of BigQuery SQL.
+// BaseSystemPrompt is the default BigQuery agent system prompt.
+// It is exported so system_prompts.go can use it as the fallback for unknown styles.
+const BaseSystemPrompt = `You are CortexAI, an expert data analyst with deep knowledge of BigQuery SQL.
 
 Your task is to help users query their BigQuery data using natural language.
 
@@ -73,21 +77,22 @@ SELECT ...
 ` + "```" + `
 5. Execute the SQL exactly once after writing it
 6. Explain results in plain language
-7. For JOIN queries: use get_bigquery_sample_data to verify join key values match before executing`
+7. For JOIN queries: use get_bigquery_sample_data to verify join key values match before executing
+8. Always respond in the same language as the user's prompt. If the user writes in Indonesian, respond in Indonesian. If in English, respond in English.`
 
-// buildSystemPrompt returns a cached system prompt pre-loaded with dataset schema.
-// Cache TTL is 5 minutes. Concurrent requests for the same dataset share a single
-// fetch via singleflight — only one BigQuery call is made regardless of how many
-// goroutines call this simultaneously.
-func (h *BigQueryHandler) buildSystemPrompt(ctx context.Context, datasetID string) string {
+// getSchemaSection returns a cached schema-only section pre-loaded from BigQuery.
+// It returns only the schema portion (no base prompt) so different personas can
+// prepend their own base prompt via SystemPromptStyle(). Cache TTL is 5 minutes.
+// Concurrent requests for the same dataset share a single fetch via singleflight.
+func (h *BigQueryHandler) getSchemaSection(ctx context.Context, datasetID string) string {
 	if datasetID == "" || h.bq == nil {
-		return baseSystemPrompt
+		return ""
 	}
 
 	// Cache hit — fast path, no lock contention beyond RLock
-	if prompt, ok := h.schemaCache.get(datasetID); ok {
+	if schema, ok := h.schemaCache.get(datasetID); ok {
 		log.Debug().Str("dataset", datasetID).Msg("schema cache hit")
-		return prompt
+		return schema
 	}
 
 	// Cache miss — use singleflight so concurrent requests for the same dataset
@@ -95,8 +100,8 @@ func (h *BigQueryHandler) buildSystemPrompt(ctx context.Context, datasetID strin
 	v, err, _ := h.schemaCache.sf.Do(datasetID, func() (interface{}, error) {
 		// Double-check cache inside singleflight in case another goroutine
 		// already populated it while we were waiting to enter.
-		if prompt, ok := h.schemaCache.get(datasetID); ok {
-			return prompt, nil
+		if schema, ok := h.schemaCache.get(datasetID); ok {
+			return schema, nil
 		}
 
 		log.Debug().Str("dataset", datasetID).Msg("schema cache miss, fetching from BigQuery")
@@ -104,11 +109,10 @@ func (h *BigQueryHandler) buildSystemPrompt(ctx context.Context, datasetID strin
 
 		tables, err := h.bq.ListTables(ctx, datasetID)
 		if err != nil {
-			return baseSystemPrompt, nil // soft fail — return base prompt, don't cache
+			return "", nil // soft fail — return empty, don't cache
 		}
 
 		var sb strings.Builder
-		sb.WriteString(baseSystemPrompt)
 		sb.WriteString("\n\n## Available Dataset: " + datasetID + "\n")
 		sb.WriteString("The following tables and schemas are already available to you:\n\n")
 
@@ -125,8 +129,8 @@ func (h *BigQueryHandler) buildSystemPrompt(ctx context.Context, datasetID strin
 
 		sb.WriteString("\nSince schemas are already provided above, you can skip list_tables and get_bigquery_schema tool calls. Go directly to get_bigquery_sample_data for JOIN queries, then write and execute the SQL.")
 
-		prompt := sb.String()
-		h.schemaCache.set(datasetID, prompt)
+		schema := sb.String()
+		h.schemaCache.set(datasetID, schema)
 
 		log.Info().
 			Str("dataset", datasetID).
@@ -134,18 +138,18 @@ func (h *BigQueryHandler) buildSystemPrompt(ctx context.Context, datasetID strin
 			Dur("fetch_ms", time.Since(fetchStart)).
 			Msg("schema cached")
 
-		return prompt, nil
+		return schema, nil
 	})
 
 	if err != nil || v == nil {
-		return baseSystemPrompt
+		return ""
 	}
 	return v.(string)
 }
 
 // BigQueryHandler orchestrates the NL→SQL→execute pipeline
 type BigQueryHandler struct {
-	agent        *CortexAgent
+	agent        LLMRunner
 	bq           *service.BigQueryService
 	piiDetector  *security.PIIDetector
 	promptVal    *security.PromptValidator
@@ -158,7 +162,7 @@ type BigQueryHandler struct {
 
 // NewBigQueryHandler creates a handler with all security components wired in
 func NewBigQueryHandler(
-	agent *CortexAgent,
+	agent LLMRunner,
 	bq *service.BigQueryService,
 	piiDetector *security.PIIDetector,
 	promptVal *security.PromptValidator,
@@ -166,6 +170,7 @@ func NewBigQueryHandler(
 	costTracker *security.CostTracker,
 	dataMasker *security.DataMasker,
 	auditLogger *security.AuditLogger,
+	schemaCacheTTL time.Duration,
 ) *BigQueryHandler {
 	return &BigQueryHandler{
 		agent:       agent,
@@ -175,18 +180,40 @@ func NewBigQueryHandler(
 		sqlVal:      sqlVal,
 		costTracker: costTracker,
 		dataMasker:  dataMasker,
-		schemaCache: newSchemaCache(),
+		schemaCache: newSchemaCache(schemaCacheTTL),
 		auditLogger: auditLogger,
 	}
 }
 
-// Handle processes an agent request for BigQuery
-func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, apiKey string) (*models.AgentResponse, error) {
+// InvalidateSchemaCache removes the cached schema prompt for the given dataset,
+// forcing the next request to re-fetch from BigQuery.
+func (h *BigQueryHandler) InvalidateSchemaCache(datasetID string) {
+	h.schemaCache.invalidate(datasetID)
+}
+
+// Handle processes an agent request for BigQuery.
+// allowedDatasets restricts which datasets this user can query (squad isolation);
+// nil means no restriction (admin or no squad configured).
+// runner is the LLMRunner resolved for the current user's persona; promptStyle
+// controls the system prompt tone ("executive", "technical", "support", or "").
+// excludedTools lists tool names to hide from the LLM; nil means all tools are available.
+func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, apiKey string, allowedDatasets []string, runner LLMRunner, promptStyle string, excludedTools []string) (*models.AgentResponse, error) {
 	start := time.Now()
 	metadata := map[string]interface{}{
 		"data_source": "bigquery",
-		"model":       h.agent.model,
+		"model":       runner.Model(),
 		"method":      "agent",
+	}
+
+	// 0. Squad dataset access check
+	if len(allowedDatasets) > 0 && req.DatasetID != nil && *req.DatasetID != "" {
+		if !isDatasetAllowed(*req.DatasetID, allowedDatasets) {
+			return &models.AgentResponse{
+				Status:        "error",
+				Prompt:        req.Prompt,
+				AgentMetadata: metadata,
+			}, fmt.Errorf("dataset '%s' is not accessible for your squad", *req.DatasetID)
+		}
 	}
 
 	// 1. PII detection
@@ -212,27 +239,32 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	}
 	metadata["prompt_validation"] = "passed"
 
-	// 3. Build tools
-	bqTools := []tools.Tool{
-		tools.BQListDatasetsTool(h.bq),
+	// 3. Build tools (BQListDatasetsTool is filtered to squad's datasets)
+	if req.DryRun {
+		excludedTools = append(excludedTools, "execute_bigquery_sql")
+	}
+	bqTools := filterTools([]tools.Tool{
+		tools.BQListDatasetsTool(h.bq, allowedDatasets),
 		tools.BQListTablesTool(h.bq),
 		tools.BQGetSchemaTool(h.bq),
 		tools.BQSampleDataTool(h.bq),
 		tools.BQExecuteQueryTool(h.bq),
-	}
+	}, excludedTools)
 
-	// 4. Build system prompt with pre-loaded schema (cached)
+	// 4. Build system prompt: persona base + cached schema section
 	datasetID := ""
 	if req.DatasetID != nil {
 		datasetID = *req.DatasetID
 	}
-	systemPrompt := h.buildSystemPrompt(ctx, datasetID)
+	systemPrompt := SystemPromptStyle(promptStyle) + h.getSchemaSection(ctx, datasetID)
 
 	// 5. Run agent loop
 	agentCtx, cancel := context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
 	defer cancel()
 
-	output, toolsUsed, lastSQL, err := h.agent.Run(agentCtx, systemPrompt, req.Prompt, bqTools)
+	llmStart := time.Now()
+	output, toolsUsed, lastSQL, err := runner.Run(agentCtx, systemPrompt, req.Prompt, bqTools)
+	llmMs := time.Since(llmStart).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("agent run: %w", err)
 	}
@@ -304,8 +336,18 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	execTimeMs := time.Since(start).Milliseconds()
 	h.auditLogger.LogAIAgentRequest(req.Prompt, apiKey, generatedSQL, true, execTimeMs)
 
-	reasoning := truncate(output, 500)
-	sqlPtr := &generatedSQL
+	answerText := cleanAnswer(output)
+	var answerPtr *string
+	if answerText != "" {
+		answerPtr = &answerText
+	}
+	var sqlPtr *string
+	if generatedSQL != "" {
+		sqlPtr = &generatedSQL
+	}
+
+	metadata["total_time_ms"] = execTimeMs
+	metadata["llm_time_ms"] = llmMs
 
 	return &models.AgentResponse{
 		Status:          "success",
@@ -313,8 +355,179 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 		GeneratedSQL:    sqlPtr,
 		ExecutionResult: execResult,
 		AgentMetadata:   metadata,
-		Reasoning:       &reasoning,
+		Answer:          answerPtr,
 	}, nil
+}
+
+// HandleStream processes an agent request for BigQuery with SSE event emission.
+// allowedDatasets restricts which datasets this user can query (squad isolation).
+// runner and promptStyle are resolved from the current user's persona (same as Handle).
+// excludedTools lists tool names to hide from the LLM; nil means all tools are available.
+// The final "result" or "error" event is always the last call to emitFn.
+func (h *BigQueryHandler) HandleStream(ctx context.Context, req *models.AgentRequest, apiKey string, allowedDatasets []string, runner LLMRunner, promptStyle string, emitFn func(event string, data interface{}), excludedTools []string) {
+	start := time.Now()
+	metadata := map[string]interface{}{
+		"data_source": "bigquery",
+		"model":       runner.Model(),
+		"method":      "agent_stream",
+	}
+
+	emitFn("start", map[string]interface{}{"prompt": req.Prompt})
+
+	// 0. Squad dataset access check
+	if len(allowedDatasets) > 0 && req.DatasetID != nil && *req.DatasetID != "" {
+		if !isDatasetAllowed(*req.DatasetID, allowedDatasets) {
+			emitFn("error", map[string]interface{}{
+				"message": fmt.Sprintf("dataset '%s' is not accessible for your squad", *req.DatasetID),
+				"step":    "dataset_access_check",
+			})
+			return
+		}
+	}
+
+	// 1. PII detection
+	emitFn("progress", map[string]interface{}{"step": "pii_check"})
+	if found, kw := h.piiDetector.Detect(req.Prompt); found {
+		metadata["pii_check"] = "blocked: " + kw
+		emitFn("error", map[string]interface{}{
+			"message": "PII detected in prompt: " + kw,
+			"step":    "pii_check",
+		})
+		return
+	}
+	metadata["pii_check"] = "passed"
+
+	// 2. Prompt validation
+	emitFn("progress", map[string]interface{}{"step": "prompt_validation"})
+	vr := h.promptVal.Validate(req.Prompt)
+	if !vr.Valid {
+		metadata["prompt_validation"] = "blocked: " + vr.Message
+		emitFn("error", map[string]interface{}{
+			"message": "prompt validation failed: " + vr.Message,
+			"step":    "prompt_validation",
+		})
+		return
+	}
+	metadata["prompt_validation"] = "passed"
+
+	// 3. Build tools (BQListDatasetsTool is filtered to squad's datasets)
+	if req.DryRun {
+		excludedTools = append(excludedTools, "execute_bigquery_sql")
+	}
+	bqTools := filterTools([]tools.Tool{
+		tools.BQListDatasetsTool(h.bq, allowedDatasets),
+		tools.BQListTablesTool(h.bq),
+		tools.BQGetSchemaTool(h.bq),
+		tools.BQSampleDataTool(h.bq),
+		tools.BQExecuteQueryTool(h.bq),
+	}, excludedTools)
+
+	// 4. Schema pre-loading
+	datasetID := ""
+	if req.DatasetID != nil {
+		datasetID = *req.DatasetID
+	}
+	emitFn("progress", map[string]interface{}{"step": "schema_loading", "dataset": datasetID})
+	systemPrompt := SystemPromptStyle(promptStyle) + h.getSchemaSection(ctx, datasetID)
+	emitFn("progress", map[string]interface{}{"step": "schema_ready", "dataset": datasetID})
+
+	// 5. Run agent loop with event emission
+	agentCtx, cancel := context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
+	defer cancel()
+
+	agentEmit := func(event string, data map[string]interface{}) {
+		emitFn(event, data)
+	}
+
+	llmStart := time.Now()
+	output, toolsUsed, lastSQL, err := runner.RunWithEmit(agentCtx, systemPrompt, req.Prompt, bqTools, agentEmit)
+	llmMs := time.Since(llmStart).Milliseconds()
+	if err != nil {
+		emitFn("error", map[string]interface{}{"message": "agent run: " + err.Error()})
+		return
+	}
+	metadata["tools_used"] = toolsUsed
+
+	// 6. Extract SQL
+	generatedSQL := extractSQL(output)
+	if generatedSQL == "" && lastSQL != "" {
+		generatedSQL = lastSQL
+		log.Debug().Str("sql", generatedSQL[:min(60, len(generatedSQL))]).Msg("stream: using lastExecutedSQL as fallback")
+	}
+	metadata["sql_validation"] = "n/a"
+	metadata["cost_tracking"] = "n/a"
+	metadata["data_masking"] = "n/a"
+
+	var execResult *models.QueryResponse
+
+	if generatedSQL != "" && !req.DryRun {
+		if errMsg := h.sqlVal.Validate(generatedSQL); errMsg != "" {
+			metadata["sql_validation"] = "blocked: " + errMsg
+			emitFn("error", map[string]interface{}{
+				"message": "SQL validation failed: " + errMsg,
+				"step":    "sql_validation",
+			})
+			return
+		}
+		metadata["sql_validation"] = "passed"
+
+		projectID := ""
+		if req.ProjectID != nil {
+			projectID = *req.ProjectID
+		}
+		emitFn("progress", map[string]interface{}{"step": "executing_sql"})
+		queryStart := time.Now()
+		result, qErr := h.bq.ExecuteQuery(agentCtx, generatedSQL, projectID, false, 60000, true, false)
+		if qErr == nil {
+			queryMs := time.Since(queryStart).Milliseconds()
+			if ok, costErr := h.costTracker.CheckLimits(result.TotalBytesProcessed, apiKey); !ok {
+				metadata["cost_tracking"] = "blocked: " + costErr
+			} else {
+				h.costTracker.LogQueryCost(generatedSQL, result.TotalBytesProcessed, apiKey, queryMs)
+				metadata["cost_tracking"] = "ok"
+				data := h.dataMasker.MaskRows(result.Data)
+				metadata["data_masking"] = "applied"
+				execResult = &models.QueryResponse{
+					Status:   "success",
+					Data:     data,
+					Columns:  result.Columns,
+					RowCount: len(data),
+					Metadata: models.QueryMetadata{
+						JobID:               result.JobID,
+						TotalBytesProcessed: result.TotalBytesProcessed,
+						BytesBilled:         result.BytesBilled,
+						CacheHit:            result.CacheHit,
+						ExecutionTimeMs:     queryMs,
+					},
+				}
+			}
+		}
+	}
+
+	execTimeMs := time.Since(start).Milliseconds()
+	h.auditLogger.LogAIAgentRequest(req.Prompt, apiKey, generatedSQL, true, execTimeMs)
+
+	answerText := cleanAnswer(output)
+	var answerPtr *string
+	if answerText != "" {
+		answerPtr = &answerText
+	}
+	var sqlPtr *string
+	if generatedSQL != "" {
+		sqlPtr = &generatedSQL
+	}
+
+	metadata["total_time_ms"] = execTimeMs
+	metadata["llm_time_ms"] = llmMs
+
+	emitFn("result", &models.AgentResponse{
+		Status:          "success",
+		Prompt:          req.Prompt,
+		GeneratedSQL:    sqlPtr,
+		ExecutionResult: execResult,
+		AgentMetadata:   metadata,
+		Answer:          answerPtr,
+	})
 }
 
 // extractSQL pulls SQL from model output using 4 strategies in order:
@@ -345,7 +558,7 @@ func extractSQL(text string) string {
 		}
 		end := strings.Index(body, "```")
 		if end != -1 {
-			if sql := strings.TrimSpace(body[:end]); sql != "" {
+			if sql := strings.TrimSuffix(strings.TrimSpace(body[:end]), ";"); sql != "" {
 				return sql
 			}
 		}
@@ -377,8 +590,9 @@ func extractSQL(text string) string {
 	// Strategy 3b: multi-line SELECT ... FROM ... LIMIT
 	if m := reSelectBlock.FindString(text); m != "" {
 		candidate := strings.TrimSuffix(strings.TrimSpace(m), ";")
-		// sanity check: must contain FROM keyword
-		if strings.Contains(strings.ToUpper(candidate), " FROM ") {
+		// sanity check: must contain FROM keyword (use "FROM " without leading space
+		// to correctly handle newline-before-FROM in multi-line queries)
+		if strings.Contains(strings.ToUpper(candidate), "FROM ") {
 			return candidate
 		}
 	}
@@ -391,9 +605,70 @@ func extractSQL(text string) string {
 	return ""
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
+// cleanAnswer strips SQL code blocks from LLM output to produce a human-readable answer.
+// It removes ```sql...``` and ```...``` blocks, collapses excess whitespace.
+func cleanAnswer(output string) string {
+	result := output
+
+	// Remove ```sql ... ``` blocks
+	for {
+		idx := strings.Index(strings.ToLower(result), "```sql")
+		if idx == -1 {
+			break
+		}
+		end := strings.Index(result[idx+6:], "```")
+		if end == -1 {
+			break
+		}
+		result = result[:idx] + result[idx+6+end+3:]
 	}
-	return s[:max] + "..."
+
+	// Remove remaining ``` ... ``` blocks
+	for {
+		idx := strings.Index(result, "```")
+		if idx == -1 {
+			break
+		}
+		end := strings.Index(result[idx+3:], "```")
+		if end == -1 {
+			break
+		}
+		result = result[:idx] + result[idx+3+end+3:]
+	}
+
+	// Collapse multiple newlines
+	for strings.Contains(result, "\n\n\n") {
+		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
+	}
+
+	return strings.TrimSpace(result)
+}
+
+// isDatasetAllowed returns true if the datasetID is in the allowed list.
+func isDatasetAllowed(datasetID string, allowedDatasets []string) bool {
+	for _, d := range allowedDatasets {
+		if d == datasetID {
+			return true
+		}
+	}
+	return false
+}
+
+// filterTools returns a new slice of tools with any tool whose Name appears in
+// excluded removed. If excluded is nil or empty, ts is returned unchanged.
+func filterTools(ts []tools.Tool, excluded []string) []tools.Tool {
+	if len(excluded) == 0 {
+		return ts
+	}
+	excSet := make(map[string]struct{}, len(excluded))
+	for _, name := range excluded {
+		excSet[name] = struct{}{}
+	}
+	result := make([]tools.Tool, 0, len(ts))
+	for _, t := range ts {
+		if _, skip := excSet[t.Name]; !skip {
+			result = append(result, t)
+		}
+	}
+	return result
 }

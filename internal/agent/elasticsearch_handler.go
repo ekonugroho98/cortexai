@@ -11,7 +11,9 @@ import (
 	"github.com/cortexai/cortexai/internal/tools"
 )
 
-const esSystemPrompt = `You are CortexAI, an expert in Elasticsearch and log analysis.
+// ESSystemPrompt is the default Elasticsearch agent system prompt.
+// Exported so system_prompts.go can use it as the fallback for unknown styles.
+const ESSystemPrompt = `You are CortexAI, an expert in Elasticsearch and log analysis.
 
 Your task is to help users investigate issues and search for data in Elasticsearch.
 
@@ -19,9 +21,10 @@ RULES:
 1. Always use list_elasticsearch_indices first to discover available indices
 2. Build precise, focused queries - never search all documents without filters
 3. Use the elasticsearch_search tool to execute searches
-4. Interpret results and explain findings clearly in Indonesian or English (match user's language)
-5. Focus on the specific identifier/time range provided by the user
-6. Maximum 100 results per search
+4. Interpret results and explain findings clearly
+5. Always respond in the same language as the user's prompt. If the user writes in Indonesian, respond in Indonesian. If in English, respond in English.
+6. Focus on the specific identifier/time range provided by the user
+7. Maximum 100 results per search
 
 Always think step by step:
 1. List available indices
@@ -31,7 +34,7 @@ Always think step by step:
 
 // ElasticsearchHandler orchestrates the NL→ES query pipeline
 type ElasticsearchHandler struct {
-	agent       *CortexAgent
+	agent       LLMRunner
 	es          *service.ElasticsearchService
 	piiDetector *security.PIIDetector
 	promptVal   *security.PromptValidator
@@ -41,7 +44,7 @@ type ElasticsearchHandler struct {
 
 // NewElasticsearchHandler creates a handler wired with security components
 func NewElasticsearchHandler(
-	agent *CortexAgent,
+	agent LLMRunner,
 	es *service.ElasticsearchService,
 	piiDetector *security.PIIDetector,
 	promptVal *security.PromptValidator,
@@ -58,12 +61,15 @@ func NewElasticsearchHandler(
 	}
 }
 
-// Handle processes an agent request for Elasticsearch
-func (h *ElasticsearchHandler) Handle(ctx context.Context, req *models.AgentRequest, apiKey string) (*models.AgentResponse, error) {
+// Handle processes an agent request for Elasticsearch.
+// allowedPatterns overrides the global ES index patterns for squad isolation;
+// nil means use the global patterns configured in the service.
+// runner and promptStyle are resolved from the current user's persona.
+func (h *ElasticsearchHandler) Handle(ctx context.Context, req *models.AgentRequest, apiKey string, allowedPatterns []string, runner LLMRunner, promptStyle string) (*models.AgentResponse, error) {
 	start := time.Now()
 	metadata := map[string]interface{}{
 		"data_source": "elasticsearch",
-		"model":       h.agent.model,
+		"model":       runner.Model(),
 		"method":      "agent",
 	}
 
@@ -102,17 +108,23 @@ func (h *ElasticsearchHandler) Handle(ctx context.Context, req *models.AgentRequ
 	}
 	metadata["es_validation"] = "passed: " + identType
 
-	// 4. Build ES tools
+	// 4. Build ES tools — use squad-scoped ES service if patterns are restricted
+	esSvc := h.es
+	if len(allowedPatterns) > 0 {
+		esSvc = h.es.WithPatterns(allowedPatterns)
+	}
 	esTools := []tools.Tool{
-		tools.ESListIndicesTool(h.es),
-		tools.ESSearchTool(h.es),
+		tools.ESListIndicesTool(esSvc),
+		tools.ESSearchTool(esSvc),
 	}
 
 	// 5. Run agent loop
 	agentCtx, cancel := context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
 	defer cancel()
 
-	output, toolsUsed, _, err := h.agent.Run(agentCtx, esSystemPrompt, req.Prompt, esTools)
+	llmStart := time.Now()
+	output, toolsUsed, _, err := runner.Run(agentCtx, ESSystemPromptStyle(promptStyle), req.Prompt, esTools)
+	llmMs := time.Since(llmStart).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("agent run: %w", err)
 	}
@@ -122,14 +134,19 @@ func (h *ElasticsearchHandler) Handle(ctx context.Context, req *models.AgentRequ
 	execTimeMs := time.Since(start).Milliseconds()
 	h.auditLogger.LogAIAgentRequest(req.Prompt, apiKey, "", true, execTimeMs)
 
-	answer := truncate(output, 500)
-	reasoning := output
+	answerText := cleanAnswer(output)
+	var answerPtr *string
+	if answerText != "" {
+		answerPtr = &answerText
+	}
+
+	metadata["total_time_ms"] = execTimeMs
+	metadata["llm_time_ms"] = llmMs
 
 	return &models.AgentResponse{
 		Status:        "success",
 		Prompt:        req.Prompt,
 		AgentMetadata: metadata,
-		Reasoning:     &reasoning,
-		Answer:        &answer,
+		Answer:        answerPtr,
 	}, nil
 }
