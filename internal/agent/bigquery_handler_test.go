@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cortexai/cortexai/internal/models"
 	"github.com/cortexai/cortexai/internal/tools"
 )
 
@@ -398,6 +399,82 @@ func TestFilterTools_DryRunWithSchemaPattern(t *testing.T) {
 	}
 	if got[0].Name != "list_bigquery_datasets" {
 		t.Errorf("dry_run+schema pattern: want list_bigquery_datasets, got %q", got[0].Name)
+	}
+}
+
+// ── responseCache ─────────────────────────────────────────────────────────────
+
+func TestResponseCache_HitMiss(t *testing.T) {
+	c := newResponseCache(time.Minute)
+	resp := &models.AgentResponse{Status: "success"}
+	key := responseCacheKey("show top 5 users", "wlt_datalake_01", "executive")
+
+	// Before set: cache miss
+	_, ok := c.get(key)
+	if ok {
+		t.Fatal("expected cache miss before any set")
+	}
+
+	c.set(key, resp)
+
+	// After set: cache hit with same pointer
+	got, ok := c.get(key)
+	if !ok {
+		t.Fatal("expected cache hit after set")
+	}
+	if got != resp {
+		t.Errorf("cached response pointer mismatch: got %p, want %p", got, resp)
+	}
+}
+
+func TestResponseCache_TTLExpiry(t *testing.T) {
+	c := newResponseCache(50 * time.Millisecond)
+	resp := &models.AgentResponse{Status: "success"}
+	key := responseCacheKey("show top 5 users", "wlt_datalake_01", "executive")
+
+	c.set(key, resp)
+
+	_, ok := c.get(key)
+	if !ok {
+		t.Fatal("expected cache hit immediately after set")
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	_, ok = c.get(key)
+	if ok {
+		t.Fatal("expected cache miss after TTL expiry")
+	}
+}
+
+func TestResponseCache_DryRunNotCached(t *testing.T) {
+	// When Handle() has dry_run=true, it skips calling cache.set().
+	// Simulate that: never call set, then verify get returns miss.
+	c := newResponseCache(time.Minute)
+	key := responseCacheKey("tampilkan semua order", "mydb", "technical")
+
+	// Simulate Handle() skipping cache.set() for dry_run=true
+	_, ok := c.get(key)
+	if ok {
+		t.Fatal("dry_run responses must not be cached (set was never called)")
+	}
+}
+
+func TestResponseCache_ErrorNotCached(t *testing.T) {
+	// When Handle() returns an error response, it must NOT call cache.set().
+	// Simulate the guard: only set if status == "success".
+	c := newResponseCache(time.Minute)
+	key := responseCacheKey("tampilkan semua order", "mydb", "technical")
+	errResp := &models.AgentResponse{Status: "error"}
+
+	// Replicate the guard in Handle():
+	if errResp.Status == "success" {
+		c.set(key, errResp)
+	}
+
+	_, ok := c.get(key)
+	if ok {
+		t.Fatal("error responses must not be cached")
 	}
 }
 

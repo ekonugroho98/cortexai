@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"regexp"
 	"strings"
@@ -59,6 +60,63 @@ func (c *schemaCache) invalidate(datasetID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.store, datasetID)
+}
+
+// ── responseCache ─────────────────────────────────────────────────────────────
+
+// responseCacheEntry stores a successful AgentResponse with its expiry time.
+type responseCacheEntry struct {
+	response  *models.AgentResponse
+	expiresAt time.Time
+}
+
+// responseCache is an in-memory, TTL-based cache for exact-match AgentResponse objects.
+// It is defined in bigquery_handler.go so both BigQueryHandler and PostgresHandler
+// (same package) can reuse the same type without an import cycle.
+type responseCache struct {
+	mu    sync.RWMutex
+	store map[string]responseCacheEntry
+	ttl   time.Duration
+}
+
+func newResponseCache(ttl time.Duration) *responseCache {
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	return &responseCache{store: make(map[string]responseCacheEntry), ttl: ttl}
+}
+
+func (c *responseCache) get(key string) (*models.AgentResponse, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e, ok := c.store[key]
+	if !ok || time.Now().After(e.expiresAt) {
+		return nil, false
+	}
+	return e.response, true
+}
+
+func (c *responseCache) set(key string, resp *models.AgentResponse) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.store[key] = responseCacheEntry{
+		response:  resp,
+		expiresAt: time.Now().Add(c.ttl),
+	}
+}
+
+func (c *responseCache) flush() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.store = make(map[string]responseCacheEntry)
+}
+
+// responseCacheKey builds a deterministic SHA-256 hex key from the three fields
+// that uniquely identify an agent query: the user prompt, the dataset/database ID,
+// and the resolved persona prompt style.
+func responseCacheKey(prompt, datasetID, promptStyle string) string {
+	sum := sha256.Sum256([]byte(prompt + "|" + datasetID + "|" + promptStyle))
+	return fmt.Sprintf("%x", sum)
 }
 
 // BaseSystemPrompt is the default BigQuery agent system prompt.
