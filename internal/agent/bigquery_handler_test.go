@@ -374,6 +374,33 @@ func TestFilterTools_DryRunPattern(t *testing.T) {
 	}
 }
 
+func TestFilterTools_DryRunWithSchemaPattern(t *testing.T) {
+	// Simulates dry_run=true + datasetID != "" (schema already injected).
+	// Expected: only list_bigquery_datasets survives.
+	allTools := makeTools(
+		"list_bigquery_datasets",
+		"list_bigquery_tables",
+		"get_bigquery_schema",
+		"get_bigquery_sample_data",
+		"execute_bigquery_sql",
+	)
+	excludedTools := []string{
+		"execute_bigquery_sql",
+		"list_bigquery_tables",
+		"get_bigquery_schema",
+		"get_bigquery_sample_data",
+	}
+
+	got := filterTools(allTools, excludedTools)
+
+	if len(got) != 1 {
+		t.Fatalf("dry_run+schema pattern: want 1 tool, got %d: %v", len(got), got)
+	}
+	if got[0].Name != "list_bigquery_datasets" {
+		t.Errorf("dry_run+schema pattern: want list_bigquery_datasets, got %q", got[0].Name)
+	}
+}
+
 // ── schema section closing instruction ───────────────────────────────────────
 
 func TestBQSchemaSectionClosingInstruction_IsDirective(t *testing.T) {
