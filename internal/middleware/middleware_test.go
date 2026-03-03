@@ -6,7 +6,18 @@ import (
 	"testing"
 
 	"github.com/cortexai/cortexai/internal/middleware"
+	"github.com/cortexai/cortexai/internal/models"
 )
+
+// testLookup is a minimal UserLookup for tests.
+type testLookup map[string]bool
+
+func (t testLookup) GetByKey(key string) (*models.User, bool) {
+	if t[key] {
+		return &models.User{ID: "t1", Name: "Test", Role: models.RoleViewer, APIKey: key}, true
+	}
+	return nil, false
+}
 
 var okHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
@@ -69,7 +80,7 @@ func TestRequestIDPropagated(t *testing.T) {
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
 func TestAuthMissingKey(t *testing.T) {
-	h := middleware.Auth([]string{"secret"}, "X-API-Key")(okHandler)
+	h := middleware.Auth(testLookup{"secret": true}, "X-API-Key")(okHandler)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/datasets", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -79,7 +90,7 @@ func TestAuthMissingKey(t *testing.T) {
 }
 
 func TestAuthInvalidKey(t *testing.T) {
-	h := middleware.Auth([]string{"secret"}, "X-API-Key")(okHandler)
+	h := middleware.Auth(testLookup{"secret": true}, "X-API-Key")(okHandler)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/datasets", nil)
 	req.Header.Set("X-API-Key", "wrong-key")
 	rr := httptest.NewRecorder()
@@ -90,7 +101,7 @@ func TestAuthInvalidKey(t *testing.T) {
 }
 
 func TestAuthValidKey(t *testing.T) {
-	h := middleware.Auth([]string{"secret"}, "X-API-Key")(okHandler)
+	h := middleware.Auth(testLookup{"secret": true}, "X-API-Key")(okHandler)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/datasets", nil)
 	req.Header.Set("X-API-Key", "secret")
 	rr := httptest.NewRecorder()
@@ -101,7 +112,7 @@ func TestAuthValidKey(t *testing.T) {
 }
 
 func TestAuthPublicPath(t *testing.T) {
-	h := middleware.Auth([]string{"secret"}, "X-API-Key")(okHandler)
+	h := middleware.Auth(testLookup{"secret": true}, "X-API-Key")(okHandler)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	// No API key set
 	rr := httptest.NewRecorder()

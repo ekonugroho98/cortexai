@@ -47,3 +47,8 @@ go.work.sum
 # K8s secrets (never commit real secrets)
 deploy/k8s/secret-prod.yaml
 deploy/k8s/secret-staging.yaml
+
+# BB-Flow framework (in-progress workspace — ephemeral)
+.bbflow/artifacts/workspace/*/
+!.bbflow/artifacts/workspace/WORKSPACE_STATE.yaml
+.bbflow/backups/

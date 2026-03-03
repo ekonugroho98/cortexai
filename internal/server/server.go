@@ -12,19 +12,21 @@ import (
 )
 
 type Server struct {
-	cfg   *config.Config
-	http  *http.Server
-	bqSvc *service.BigQueryService // FIX #7: held for graceful close
+	cfg        *config.Config
+	http       *http.Server
+	bqSvc      *service.BigQueryService  // FIX #7: held for graceful close
+	pgRegistry *service.PGPoolRegistry   // held for graceful close
 }
 
 func New(cfg *config.Config) (*Server, error) {
 	s := &Server{cfg: cfg}
 
-	router, bqSvc, err := s.setupRoutes()
+	router, bqSvc, pgRegistry, err := s.setupRoutes()
 	if err != nil {
 		return nil, fmt.Errorf("setup routes: %w", err)
 	}
 	s.bqSvc = bqSvc
+	s.pgRegistry = pgRegistry
 
 	s.http = &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
@@ -60,6 +62,15 @@ func (s *Server) Run(ctx context.Context) error {
 				log.Warn().Err(closeErr).Msg("error closing BigQuery client")
 			} else {
 				log.Info().Msg("BigQuery client closed")
+			}
+		}
+
+		// Close PostgreSQL pools on shutdown
+		if s.pgRegistry != nil {
+			if closeErr := s.pgRegistry.CloseAll(); closeErr != nil {
+				log.Warn().Err(closeErr).Msg("error closing PostgreSQL pools")
+			} else {
+				log.Info().Msg("PostgreSQL pools closed")
 			}
 		}
 

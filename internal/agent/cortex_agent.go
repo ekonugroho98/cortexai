@@ -42,11 +42,27 @@ func NewCortexAgent(apiKey, model, baseURL string) *CortexAgent {
 	}
 }
 
+// EmitFn is called during agent execution to emit progress events for streaming.
+// It may be nil when streaming is not needed.
+type EmitFn func(event string, data map[string]interface{})
+
 // Run executes the agent loop: LLM calls tools until stop_reason = "end_turn".
 // Returns (finalText, toolsUsed, lastExecutedSQL, error).
 // lastExecutedSQL is the last SQL passed to execute_bigquery_sql tool — used as
 // fallback when the model doesn't include a ```sql block in its final reply.
 func (a *CortexAgent) Run(ctx context.Context, systemPrompt, userPrompt string, agentTools []tools.Tool) (string, []string, string, error) {
+	return a.run(ctx, systemPrompt, userPrompt, agentTools, nil)
+}
+
+// RunWithEmit is like Run but calls emitFn at each LLM iteration and tool call.
+func (a *CortexAgent) RunWithEmit(ctx context.Context, systemPrompt, userPrompt string, agentTools []tools.Tool, emitFn EmitFn) (string, []string, string, error) {
+	return a.run(ctx, systemPrompt, userPrompt, agentTools, emitFn)
+}
+
+// Model returns the configured model identifier.
+func (a *CortexAgent) Model() string { return a.model }
+
+func (a *CortexAgent) run(ctx context.Context, systemPrompt, userPrompt string, agentTools []tools.Tool, emitFn EmitFn) (string, []string, string, error) {
 	// Build Anthropic tool definitions as ToolUnionUnionParam slice
 	anthToolParams := make([]anthropic.ToolUnionUnionParam, len(agentTools))
 	for i, t := range agentTools {
@@ -78,6 +94,10 @@ func (a *CortexAgent) Run(ctx context.Context, systemPrompt, userPrompt string, 
 	maxIter := 10
 
 	for iter := 0; iter < maxIter; iter++ {
+		if emitFn != nil {
+			emitFn("llm_call", map[string]interface{}{"iteration": iter})
+		}
+
 		params := anthropic.MessageNewParams{
 			Model:     anthropic.F(anthropic.Model(a.model)),
 			MaxTokens: anthropic.F(int64(a.maxTokens)),
@@ -130,15 +150,18 @@ func (a *CortexAgent) Run(ctx context.Context, systemPrompt, userPrompt string, 
 			Int("tool_calls", len(pendingToolCalls)).
 			Msg("agent iteration")
 
-		// Exit if done: end_turn / stop / no pending tools / not tool_use
-		isDone := resp.StopReason == "end_turn" ||
-			resp.StopReason == "stop" ||
-			resp.StopReason == "stop_sequence" ||
-			resp.StopReason == "max_tokens" ||
-			len(pendingToolCalls) == 0
-		if isDone {
+		// max_tokens: LLM was truncated — don't attempt to process partial tool calls.
+		if resp.StopReason == "max_tokens" {
 			return textContent, toolsUsed, lastExecutedSQL, nil
 		}
+
+		// No pending tool calls → we're done regardless of stop_reason.
+		// This handles end_turn, stop, stop_sequence from all providers.
+		if len(pendingToolCalls) == 0 {
+			return textContent, toolsUsed, lastExecutedSQL, nil
+		}
+		// Has pending tool calls → process them even if stop_reason is "stop".
+		// GLM quirk: returns stop_reason "stop" with tool_use blocks present.
 
 		// Force final answer after 7 iterations to avoid runaway loops
 		if iter >= 7 {
@@ -178,6 +201,19 @@ func (a *CortexAgent) Run(ctx context.Context, systemPrompt, userPrompt string, 
 				if sql, ok := tc.Input["sql"].(string); ok && sql != "" {
 					lastExecutedSQL = sql
 				}
+			}
+			if emitFn != nil {
+				evData := map[string]interface{}{"tool": tc.Name, "iteration": iter}
+				if tc.Name == "execute_bigquery_sql" {
+					if sql, ok := tc.Input["sql"].(string); ok && len(sql) > 0 {
+						if len(sql) > 120 {
+							evData["sql_preview"] = sql[:120] + "..."
+						} else {
+							evData["sql_preview"] = sql
+						}
+					}
+				}
+				emitFn("tool_call", evData)
 			}
 			result, execErr := executeTool(ctx, tc, agentTools)
 			if execErr != nil {

@@ -6,8 +6,9 @@ import "strings"
 type DataSource string
 
 const (
-	DataSourceBigQuery       DataSource = "bigquery"
-	DataSourceElasticsearch  DataSource = "elasticsearch"
+	DataSourceBigQuery      DataSource = "bigquery"
+	DataSourceElasticsearch DataSource = "elasticsearch"
+	DataSourcePostgres      DataSource = "postgres"
 )
 
 var elasticsearchKeywords = []string{
@@ -18,6 +19,15 @@ var elasticsearchKeywords = []string{
 	"last hour", "last 24", "last minute",
 	"investigation", "investigate", "what happened", "troubleshoot",
 	"trace id", "request id", "correlation id",
+}
+
+var postgresKeywords = []string{
+	"postgres", "postgresql", "pg_", "pg ",
+	"relational", "foreign key", "primary key",
+	"sequence", "trigger", "stored procedure",
+	"schema public", "information_schema",
+	"serial", "uuid", "jsonb", "hstore",
+	"lateral", "window function", "cte",
 }
 
 var bigqueryKeywords = []string{
@@ -37,6 +47,7 @@ type RoutingResult struct {
 	Confidence float64
 	ESScore    int
 	BQScore    int
+	PGScore    int
 	Reasoning  string
 }
 
@@ -47,12 +58,14 @@ func NewIntentRouter() *IntentRouter {
 	return &IntentRouter{}
 }
 
-// Route analyses the prompt and returns the best matching data source
+// Route analyses the prompt and returns the best matching data source.
+// Three-way scoring: BQ vs PG vs ES. Tie-break order: BQ > PG > ES.
 func (r *IntentRouter) Route(prompt string) RoutingResult {
 	lower := strings.ToLower(prompt)
 
 	esScore := 0
 	bqScore := 0
+	pgScore := 0
 
 	for _, kw := range elasticsearchKeywords {
 		if strings.Contains(lower, kw) {
@@ -64,35 +77,44 @@ func (r *IntentRouter) Route(prompt string) RoutingResult {
 			bqScore++
 		}
 	}
+	for _, kw := range postgresKeywords {
+		if strings.Contains(lower, kw) {
+			pgScore++
+		}
+	}
 
-	total := esScore + bqScore
+	total := esScore + bqScore + pgScore
 	if total == 0 {
 		return RoutingResult{
 			Source:     DataSourceBigQuery,
 			Confidence: 0.5,
-			ESScore:    0,
-			BQScore:    0,
 			Reasoning:  "no strong keywords, defaulting to BigQuery",
 		}
 	}
 
-	if esScore > bqScore {
-		confidence := float64(esScore) / float64(total)
-		return RoutingResult{
-			Source:     DataSourceElasticsearch,
-			Confidence: confidence,
-			ESScore:    esScore,
-			BQScore:    bqScore,
-			Reasoning:  "prompt contains Elasticsearch-related keywords",
-		}
+	// Determine winner: highest score wins; tie-break BQ > PG > ES
+	winner := DataSourceBigQuery
+	winScore := bqScore
+	reason := "prompt contains BigQuery/analytics-related keywords"
+
+	if pgScore > winScore {
+		winner = DataSourcePostgres
+		winScore = pgScore
+		reason = "prompt contains PostgreSQL-related keywords"
+	}
+	if esScore > winScore {
+		winner = DataSourceElasticsearch
+		winScore = esScore
+		reason = "prompt contains Elasticsearch-related keywords"
 	}
 
-	confidence := float64(bqScore) / float64(total)
+	confidence := float64(winScore) / float64(total)
 	return RoutingResult{
-		Source:     DataSourceBigQuery,
+		Source:     winner,
 		Confidence: confidence,
 		ESScore:    esScore,
 		BQScore:    bqScore,
-		Reasoning:  "prompt contains BigQuery/analytics-related keywords",
+		PGScore:    pgScore,
+		Reasoning:  reason,
 	}
 }

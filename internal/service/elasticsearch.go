@@ -54,6 +54,16 @@ func NewElasticsearchService(scheme, host string, port int, user, password strin
 	}, nil
 }
 
+// WithPatterns returns a shallow copy of the service with a different allowedPatterns
+// list. The underlying client is shared — this is cheap and safe for per-request use.
+// Pass nil to inherit the original service's patterns unchanged.
+func (s *ElasticsearchService) WithPatterns(patterns []string) *ElasticsearchService {
+	return &ElasticsearchService{
+		client:          s.client,
+		allowedPatterns: patterns,
+	}
+}
+
 // IsIndexAllowed returns true if the index matches any of the allowed patterns.
 // If no patterns are configured, all indices are allowed.
 func (s *ElasticsearchService) IsIndexAllowed(index string) bool {

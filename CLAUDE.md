@@ -36,12 +36,15 @@ Request → middleware (auth, ratelimit, logging)
 | File | Keterangan |
 |------|-----------|
 | `internal/agent/cortex_agent.go` | LLM loop, tool execution, lastExecutedSQL tracking |
-| `internal/agent/bigquery_handler.go` | Schema cache (5min TTL + singleflight), SQL extraction (4 strategies) |
+| `internal/agent/bigquery_handler.go` | Schema cache (5min TTL + singleflight, schema-only via `getSchemaSection()`), SQL extraction (4 strategies) |
 | `internal/agent/elasticsearch_handler.go` | ES NL→query pipeline |
+| `internal/agent/llm_pool.go` | LLMPool — multiple LLMRunner instances keyed by `provider:model`, fallback support |
+| `internal/agent/system_prompts.go` | Per-persona system prompts; `SystemPromptStyle()` + `ESSystemPromptStyle()` |
+| `internal/agent/llm.go` | LLMRunner interface (`Run`, `RunWithEmit`, `Model`) |
 | `internal/service/router.go` | Intent routing BQ vs ES berdasarkan keyword scoring |
 | `internal/security/prompt_validator.go` | 30+ dangerous patterns, Indonesian + English keywords |
 | `internal/security/sql_validator.go` | SQL injection prevention, UNION ALL SELECT diizinkan |
-| `internal/config/config.go` | Config struct, env override, AnthropicBaseURL |
+| `internal/config/config.go` | Config struct, env override, AnthropicBaseURL, PersonaConfig, Personas map |
 
 ## API Endpoints
 ```
@@ -66,6 +69,22 @@ GET  /api/v1/elasticsearch/*    # ES endpoints (jika enabled)
 }
 ```
 
+## Persona System
+Config `personas` map di `cortexai.json`:
+```json
+"personas": {
+  "executive":  { "provider": "anthropic", "model": "...", "system_prompt_style": "executive" },
+  "developer":  { "provider": "anthropic", "model": "...", "system_prompt_style": "technical" },
+  "app_support":{ "provider": "anthropic", "model": "...", "system_prompt_style": "support" }
+}
+```
+- User di-assign via `"persona"` field di `users` array
+- `resolvePersona()` di `handler/agent.go` → O(1) lookup di LLMPool
+- User tanpa `persona` atau persona tidak dikenal → fallback runner + BaseSystemPrompt
+- `agent_metadata` response selalu menyertakan `persona` dan `model`
+- Prompt styles BQ: `executive`, `technical`, `support`; ES: `executive`, `support`
+- Schema cache tetap di-share semua persona (hanya schema section, bukan base prompt)
+
 ## Important Design Decisions
 1. **UNION ALL SELECT diizinkan** — legitimate BigQuery multi-table combine
 2. **Schema pre-loading** — semua table schema diinjek ke system prompt sebelum agent run
@@ -74,6 +93,8 @@ GET  /api/v1/elasticsearch/*    # ES endpoints (jika enabled)
 5. **Force final answer** — setelah iter ke-7, inject "berikan jawaban final sekarang"
 6. **Router tie-breaking** — jika ES score == BQ score, default ke BigQuery
 7. **GLM stop reasons** — handle `stop`, `stop_sequence`, `max_tokens` selain `end_turn`
+8. **LLMPool deduplication** — personas dengan `provider+model` yang sama berbagi satu LLMRunner instance
+9. **Schema cache = schema only** — `getSchemaSection()` cache schema portion saja; base prompt di-compose per-request via `SystemPromptStyle()`
 
 ## Credentials (gitignored)
 - `config/cortexai.json` — config dengan API key asli
@@ -90,10 +111,10 @@ GET  /api/v1/elasticsearch/*    # ES endpoints (jika enabled)
 
 ## Test Status
 ```
-ok  internal/middleware    (auth, ratelimit, cors)
-ok  internal/security      (PII, prompt validator, SQL validator)
-ok  internal/service       (intent router)
--   internal/agent         (no tests yet)
+ok  internal/middleware    (auth, ratelimit, cors)      — 12 tests
+ok  internal/security      (PII, prompt validator, SQL validator) — 14 tests
+ok  internal/service       (intent router)              — 4 tests
+ok  internal/agent         (LLMPool, system prompts, extractSQL, schemaCache, DeepSeek) — 44 tests
 -   internal/handler       (no tests yet)
 -   internal/tools         (no tests yet)
 ```

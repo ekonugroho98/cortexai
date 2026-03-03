@@ -11,8 +11,64 @@
   ],
 
   "api_key_header": "X-API-Key",
-  "api_keys": [
-    "your-api-key-here"
+  "api_keys": [],
+  "squads": [
+    {
+      "id": "payment",
+      "name": "Payment Squad",
+      "datasets": ["payment_datalake_01", "payment_analytics"],
+      "es_index_patterns": ["payment-k8s-prd-*", "payment-k8s-stg-*"],
+      "postgres": {
+        "host": "pg-payment.internal",
+        "port": 5432,
+        "user": "readonly_user",
+        "password": "replace-me",
+        "databases": ["payment_db", "payment_analytics_db"],
+        "ssl_mode": "require",
+        "max_conns": 5
+      }
+    },
+    {
+      "id": "user-platform",
+      "name": "User Platform Squad",
+      "datasets": ["user_datalake_01", "user_events"],
+      "es_index_patterns": ["userplatform-k8s-prd-*", "userplatform-k8s-stg-*"],
+      "postgres": {
+        "host": "pg-userplatform.internal",
+        "port": 5432,
+        "user": "readonly_user",
+        "password": "replace-me",
+        "databases": ["user_db"],
+        "ssl_mode": "require"
+      }
+    }
+  ],
+  "personas": {
+    "executive": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "system_prompt_style": "executive",
+      "max_tokens": 2048,
+      "excluded_tools": ["get_bigquery_sample_data"],
+      "allowed_data_sources": ["bigquery", "postgres"]
+    },
+    "developer": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "system_prompt_style": "technical"
+    },
+    "app_support": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5-20251001",
+      "system_prompt_style": "support",
+      "max_tokens": 4096
+    }
+  },
+  "users": [
+    { "id": "u1", "name": "Alice", "role": "admin",   "squad_id": "",              "persona": "",           "api_key": "sk-alice-replace-me" },
+    { "id": "u2", "name": "Bob",   "role": "analyst",  "squad_id": "payment",       "persona": "developer",  "api_key": "sk-bob-replace-me" },
+    { "id": "u3", "name": "Carol", "role": "analyst",  "squad_id": "user-platform", "persona": "app_support","api_key": "sk-carol-replace-me" },
+    { "id": "u4", "name": "Dave",  "role": "viewer",   "squad_id": "payment",       "persona": "executive",  "api_key": "sk-dave-replace-me" }
   ],
   "enable_auth": true,
   "rate_limit_per_minute": 60,
@@ -38,11 +94,19 @@
     "access token", "api key", "personal data"
   ],
 
+  "llm_provider": "anthropic",
   "anthropic_api_key": "sk-ant-your-key-here",
+  "deepseek_api_key": "",
+  "deepseek_base_url": "",
   "agent_timeout": 300,
+  "schema_cache_ttl": 5,
   "model_list": {
-    "anthropic": "claude-sonnet-4-6"
+    "anthropic": "claude-sonnet-4-6",
+    "deepseek": "deepseek-chat"
   },
+
+  "postgres_enabled": false,
+  "max_pg_query_cost": 100000,
 
   "elasticsearch_enabled": false,
   "elasticsearch_host": "localhost",

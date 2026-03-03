@@ -51,6 +51,5 @@ type AgentResponse struct {
 	GeneratedSQL    *string                `json:"generated_sql,omitempty"`
 	ExecutionResult *QueryResponse         `json:"execution_result,omitempty"`
 	AgentMetadata   map[string]interface{} `json:"agent_metadata"`
-	Reasoning       *string                `json:"reasoning,omitempty"`
 	Answer          *string                `json:"answer,omitempty"`
 }

@@ -56,6 +56,15 @@ var dangerousPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)new\s+context\s*:`),
 	regexp.MustCompile(`(?i)change\s+context\s*:`),
 	regexp.MustCompile(`(?i)instead\s+of\s+the\s+above`),
+
+	// SQL DML statements (raw mutation commands in prompt)
+	regexp.MustCompile(`(?i)^\s*DELETE\s+FROM\b`),
+	regexp.MustCompile(`(?i)^\s*DROP\s+`),
+	regexp.MustCompile(`(?i)^\s*INSERT\s+INTO\b`),
+	regexp.MustCompile(`(?i)^\s*UPDATE\s+\w+\s+SET\b`),
+	regexp.MustCompile(`(?i)^\s*ALTER\s+`),
+	regexp.MustCompile(`(?i)^\s*TRUNCATE\s+`),
+	regexp.MustCompile(`(?i)^\s*CREATE\s+`),
 }
 
 var suspiciousIndicators = []string{

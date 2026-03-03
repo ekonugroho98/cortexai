@@ -7,6 +7,53 @@ import (
 	"strings"
 )
 
+// PersonaConfig defines the AI behavior for a named persona.
+// Provider references the LLM provider ("anthropic" or "deepseek").
+// SystemPromptStyle controls the response tone: "executive", "technical", or "support".
+// ExcludedTools lists tool names that will not be passed to the LLM for this persona.
+// Nil or empty means all tools are available (backward compatible).
+// AllowedDataSources lists the data sources this persona may query ("bigquery", "elasticsearch").
+// Nil or empty means all data sources are allowed (backward compatible).
+type PersonaConfig struct {
+	Provider           string   `json:"provider"`                        // "anthropic" | "deepseek"
+	Model              string   `json:"model"`                           // e.g. "claude-sonnet-4-6", "glm-4.5-air"
+	BaseURL            string   `json:"base_url,omitempty"`              // optional: override base URL for this persona
+	SystemPromptStyle  string   `json:"system_prompt_style"`             // "executive" | "technical" | "support"
+	MaxTokens          int      `json:"max_tokens,omitempty"`            // 0 = use agent default (4096)
+	ExcludedTools      []string `json:"excluded_tools,omitempty"`        // tool names to hide from LLM; nil = all tools
+	AllowedDataSources []string `json:"allowed_data_sources,omitempty"` // allowed data sources; nil = all sources
+}
+
+// PostgresConfig defines a per-squad PostgreSQL connection.
+type PostgresConfig struct {
+	Host      string   `json:"host"`
+	Port      int      `json:"port"`
+	User      string   `json:"user"`
+	Password  string   `json:"password"`
+	Databases []string `json:"databases"`
+	SSLMode   string   `json:"ssl_mode"`
+	MaxConns  int      `json:"max_conns,omitempty"`
+}
+
+// SquadConfig defines a team's data access boundaries.
+type SquadConfig struct {
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	Datasets        []string        `json:"datasets"`          // allowed BigQuery dataset IDs
+	ESIndexPatterns []string        `json:"es_index_patterns"` // allowed Elasticsearch index patterns
+	Postgres        *PostgresConfig `json:"postgres,omitempty"` // per-squad PG connection
+}
+
+// UserConfig defines a named user with a role and an associated API key.
+type UserConfig struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Role    string `json:"role"`              // "admin" | "analyst" | "viewer"
+	APIKey  string `json:"api_key"`
+	SquadID string `json:"squad_id"`          // references SquadConfig.ID; empty = no squad restriction
+	Persona string `json:"persona,omitempty"` // references Personas map key; empty = "default"
+}
+
 type Config struct {
 	// Server
 	Host        string `json:"host"`
@@ -19,9 +66,12 @@ type Config struct {
 	CORSOrigins []string `json:"cors_origins"`
 
 	// Auth
-	APIKeyHeader string   `json:"api_key_header"`
-	APIKeys      []string `json:"api_keys"`
-	EnableAuth   bool     `json:"enable_auth"`
+	APIKeyHeader string                   `json:"api_key_header"`
+	APIKeys      []string                 `json:"api_keys"`  // legacy: keys without user profiles (assigned viewer role)
+	Users        []UserConfig             `json:"users"`     // keys with explicit user profiles and roles
+	Squads       []SquadConfig            `json:"squads"`    // team data boundaries
+	Personas     map[string]PersonaConfig `json:"personas"`  // persona name → AI behavior config
+	EnableAuth   bool                     `json:"enable_auth"`
 
 	// Rate Limiting
 	RateLimitPerMinute int `json:"rate_limit_per_minute"`
@@ -53,10 +103,18 @@ type Config struct {
 	ElasticsearchTimeout    int    `json:"elasticsearch_timeout"`
 
 	// AI / LLM
-	AnthropicAPIKey  string            `json:"anthropic_api_key"`
-	AnthropicBaseURL string            `json:"anthropic_base_url"` // override for Z.ai / custom proxy
-	AgentTimeout     int               `json:"agent_timeout"`
-	ModelList        map[string]string `json:"model_list"` // provider -> model ID
+	LLMProvider         string            `json:"llm_provider"`           // "anthropic" (default) | "deepseek"
+	AnthropicAPIKey     string            `json:"anthropic_api_key"`
+	AnthropicBaseURL    string            `json:"anthropic_base_url"`     // override for Z.ai / custom proxy
+	DeepSeekAPIKey      string            `json:"deepseek_api_key"`
+	DeepSeekBaseURL     string            `json:"deepseek_base_url"`      // optional override
+	AgentTimeout        int               `json:"agent_timeout"`
+	SchemaCacheTTL      int               `json:"schema_cache_ttl"`       // minutes; 0 = default 5 min
+	ModelList           map[string]string `json:"model_list"`             // provider -> model ID
+
+	// PostgreSQL
+	PostgresEnabled    bool    `json:"postgres_enabled"`
+	MaxPGQueryCost     float64 `json:"max_pg_query_cost"` // max EXPLAIN cost units
 
 	// Elasticsearch Index Patterns
 	ESAllowedPatterns []string `json:"es_allowed_patterns"`
@@ -136,11 +194,23 @@ func applyEnvOverrides(cfg *Config) {
 	if v := getEnv("GOOGLE_APPLICATION_CREDENTIALS", ""); v != "" {
 		cfg.GoogleApplicationCredentials = v
 	}
+	if v := getEnv("LLM_PROVIDER", ""); v != "" {
+		cfg.LLMProvider = v
+	}
 	if v := getEnv("ANTHROPIC_API_KEY", ""); v != "" {
 		cfg.AnthropicAPIKey = v
 	}
 	if v := getEnv("ANTHROPIC_BASE_URL", ""); v != "" {
 		cfg.AnthropicBaseURL = v
+	}
+	if v := getEnv("DEEPSEEK_API_KEY", ""); v != "" {
+		cfg.DeepSeekAPIKey = v
+	}
+	if v := getEnv("DEEPSEEK_BASE_URL", ""); v != "" {
+		cfg.DeepSeekBaseURL = v
+	}
+	if v := getEnv("POSTGRES_ENABLED", ""); v != "" {
+		cfg.PostgresEnabled = v == "true" || v == "1"
 	}
 	if v := getEnv("ELASTICSEARCH_ENABLED", ""); v != "" {
 		cfg.ElasticsearchEnabled = v == "true" || v == "1"
