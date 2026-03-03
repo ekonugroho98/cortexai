@@ -247,6 +247,10 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	// 3. Build tools (BQListDatasetsTool is filtered to squad's datasets)
 	if req.DryRun {
 		excludedTools = append(excludedTools, "execute_bigquery_sql")
+		if req.DatasetID != nil && *req.DatasetID != "" {
+			// Schema already injected into system prompt — no need for inspection tools.
+			excludedTools = append(excludedTools, "list_bigquery_tables", "get_bigquery_schema", "get_bigquery_sample_data")
+		}
 	}
 	bqTools := filterTools([]tools.Tool{
 		tools.BQListDatasetsTool(h.bq, allowedDatasets),
@@ -418,6 +422,10 @@ func (h *BigQueryHandler) HandleStream(ctx context.Context, req *models.AgentReq
 	// 3. Build tools (BQListDatasetsTool is filtered to squad's datasets)
 	if req.DryRun {
 		excludedTools = append(excludedTools, "execute_bigquery_sql")
+		if req.DatasetID != nil && *req.DatasetID != "" {
+			// Schema already injected into system prompt — no need for inspection tools.
+			excludedTools = append(excludedTools, "list_bigquery_tables", "get_bigquery_schema", "get_bigquery_sample_data")
+		}
 	}
 	bqTools := filterTools([]tools.Tool{
 		tools.BQListDatasetsTool(h.bq, allowedDatasets),
