@@ -14,6 +14,10 @@ var sqlDangerousPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i);\s*ALTER\s+`),
 	regexp.MustCompile(`(?i);\s*CREATE\s+`),
 	regexp.MustCompile(`(?i);\s*TRUNCATE\s+`),
+	// DML embedded in subquery/CTE (no semicolon prefix needed)
+	regexp.MustCompile(`(?i)\bDELETE\s+FROM\b`),
+	regexp.MustCompile(`(?i)\bINSERT\s+INTO\b`),
+	regexp.MustCompile(`(?i)\bUPDATE\s+\w+\s+SET\b`),
 	regexp.MustCompile(`(?i);\s*EXEC\s*\(?`),
 	regexp.MustCompile(`(?i);\s*EXECUTE\s+`),
 	regexp.MustCompile(`(?i)\bUNION\s+SELECT\b`), // UNION ALL SELECT is allowed; UNION SELECT is injection
@@ -31,6 +35,26 @@ var sqlDangerousPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\band\s+1\s*=\s*1\b`),
 	regexp.MustCompile(`(?i)\bor\s+'1'\s*=\s*'1'`),
 	regexp.MustCompile(`(?i)\band\s+'1'\s*=\s*'1'`),
+}
+
+// pgDangerousPatterns are PostgreSQL-specific dangerous patterns checked by ValidatePG.
+var pgDangerousPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bCOPY\s+`),
+	regexp.MustCompile(`(?i)\bSET\s+`),
+	regexp.MustCompile(`(?i)\bGRANT\s+`),
+	regexp.MustCompile(`(?i)\bREVOKE\s+`),
+	regexp.MustCompile(`(?i)\bDO\s+\$`),            // DO $$ ... $$ anonymous block
+	regexp.MustCompile(`(?i)\bpg_sleep\s*\(`),
+	regexp.MustCompile(`(?i)\bpg_read_file\s*\(`),
+	regexp.MustCompile(`(?i)\bpg_read_binary_file\s*\(`),
+	regexp.MustCompile(`(?i)\blo_import\s*\(`),
+	regexp.MustCompile(`(?i)\blo_export\s*\(`),
+	regexp.MustCompile(`(?i)\bVACUUM\b`),
+	regexp.MustCompile(`(?i)\bREINDEX\b`),
+	regexp.MustCompile(`(?i)\bLISTEN\s+`),
+	regexp.MustCompile(`(?i)\bNOTIFY\s+`),
+	regexp.MustCompile(`(?i)\bpg_terminate_backend\s*\(`),
+	regexp.MustCompile(`(?i)\bpg_cancel_backend\s*\(`),
 }
 
 var allowedKeywords = map[string]bool{
@@ -75,5 +99,18 @@ func (v *SQLValidator) Validate(sql string) string {
 		}
 	}
 
+	return ""
+}
+
+// ValidatePG runs the base validation plus PostgreSQL-specific patterns.
+func (v *SQLValidator) ValidatePG(sql string) string {
+	if msg := v.Validate(sql); msg != "" {
+		return msg
+	}
+	for _, pattern := range pgDangerousPatterns {
+		if pattern.MatchString(sql) {
+			return "PG dangerous pattern detected: " + pattern.String()
+		}
+	}
 	return ""
 }

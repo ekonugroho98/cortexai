@@ -95,6 +95,10 @@ func TestSQLValidator(t *testing.T) {
 		"SELECT id, name FROM users WHERE id = 1",
 		"WITH cte AS (SELECT 1) SELECT * FROM cte",
 		"SELECT COUNT(*) FROM orders GROUP BY status",
+		// CTE with SELECT (not DML) must remain valid
+		"WITH cte AS (SELECT id FROM orders) SELECT * FROM cte",
+		// UNION ALL SELECT is allowed (legitimate multi-table combine)
+		"SELECT * FROM a UNION ALL SELECT * FROM b",
 	}
 	for _, sql := range valid {
 		if msg := v.Validate(sql); msg != "" {
@@ -111,11 +115,95 @@ func TestSQLValidator(t *testing.T) {
 		"INSERT INTO users VALUES (1, 'hack')",
 		"SELECT * FROM users WHERE id = 1 OR 1=1",
 		"",
+		// DML embedded in CTE or subquery (no semicolon prefix)
+		"WITH x AS (DELETE FROM orders RETURNING id) SELECT * FROM x",
+		"SELECT * FROM t WHERE id IN (INSERT INTO evil SELECT 1 RETURNING id)",
+		"SELECT a, (UPDATE orders SET status='x' WHERE id=1 RETURNING id) FROM t",
 	}
 	for _, sql := range invalid {
 		if msg := v.Validate(sql); msg == "" {
 			t.Errorf("dangerous SQL not rejected: %q", sql)
 		}
+	}
+}
+
+// ─── SQLValidator PG ─────────────────────────────────────────────────────────
+
+func TestSQLValidatorPG_ValidQueries(t *testing.T) {
+	v := security.NewSQLValidator()
+	valid := []string{
+		"SELECT * FROM public.users",
+		"WITH cte AS (SELECT 1) SELECT * FROM cte",
+		`SELECT id, name FROM "public"."users" WHERE id = 1`,
+	}
+	for _, sql := range valid {
+		if msg := v.ValidatePG(sql); msg != "" {
+			t.Errorf("valid PG SQL rejected: %q -> %s", sql, msg)
+		}
+	}
+}
+
+func TestSQLValidatorPG_BlocksCOPY(t *testing.T) {
+	v := security.NewSQLValidator()
+	if msg := v.ValidatePG("SELECT 1; COPY users TO '/tmp/dump'"); msg == "" {
+		t.Error("COPY should be blocked")
+	}
+}
+
+func TestSQLValidatorPG_BlocksSET(t *testing.T) {
+	v := security.NewSQLValidator()
+	if msg := v.ValidatePG("SELECT 1; SET role = admin"); msg == "" {
+		t.Error("SET should be blocked")
+	}
+}
+
+func TestSQLValidatorPG_BlocksPgSleep(t *testing.T) {
+	v := security.NewSQLValidator()
+	if msg := v.ValidatePG("SELECT pg_sleep(10)"); msg == "" {
+		t.Error("pg_sleep should be blocked")
+	}
+}
+
+func TestSQLValidatorPG_BlocksDOBlock(t *testing.T) {
+	v := security.NewSQLValidator()
+	if msg := v.ValidatePG("SELECT 1; DO $$ BEGIN RAISE NOTICE 'x'; END $$"); msg == "" {
+		t.Error("DO $$ blocks should be blocked")
+	}
+}
+
+func TestSQLValidatorPG_BlocksGRANT(t *testing.T) {
+	v := security.NewSQLValidator()
+	if msg := v.ValidatePG("SELECT 1; GRANT ALL ON users TO public"); msg == "" {
+		t.Error("GRANT should be blocked")
+	}
+}
+
+func TestSQLValidatorPG_BlocksVACUUM(t *testing.T) {
+	v := security.NewSQLValidator()
+	if msg := v.ValidatePG("VACUUM FULL users"); msg == "" {
+		t.Error("VACUUM should be blocked (not a SELECT)")
+	}
+}
+
+func TestSQLValidatorPG_BlocksPgReadFile(t *testing.T) {
+	v := security.NewSQLValidator()
+	if msg := v.ValidatePG("SELECT pg_read_file('/etc/passwd')"); msg == "" {
+		t.Error("pg_read_file should be blocked")
+	}
+}
+
+func TestSQLValidatorPG_BlocksTerminateBackend(t *testing.T) {
+	v := security.NewSQLValidator()
+	if msg := v.ValidatePG("SELECT pg_terminate_backend(12345)"); msg == "" {
+		t.Error("pg_terminate_backend should be blocked")
+	}
+}
+
+func TestSQLValidatorPG_InheritsBasePatterns(t *testing.T) {
+	v := security.NewSQLValidator()
+	// Should still catch base patterns like UNION SELECT
+	if msg := v.ValidatePG("SELECT * FROM users UNION SELECT * FROM passwords"); msg == "" {
+		t.Error("UNION SELECT should be blocked by base patterns")
 	}
 }
 
@@ -129,6 +217,10 @@ func TestPromptValidator(t *testing.T) {
 		"List all datasets in the analytics project",
 		"Get total revenue for last month",
 		"Find errors in the log for order_id: 12345",
+		// NL prompts that mention DML words mid-sentence must NOT be blocked
+		"show me orders that were deleted last month",
+		"how many records were updated this week",
+		"tampilkan data yang sudah di-drop dari sistem",
 	}
 	for _, p := range valid {
 		if r := v.Validate(p); !r.Valid {
@@ -146,6 +238,14 @@ func TestPromptValidator(t *testing.T) {
 		{"ls -la /etc/shadow", "file path"},
 		{"eval(os.system('ls'))", "code execution"},
 		{"", "empty"},
+		// SQL DML statements
+		{"DELETE FROM orders WHERE id = 1", "sql dml delete"},
+		{"DROP TABLE users", "sql dml drop"},
+		{"INSERT INTO admin_users VALUES ('hacker', 'pwd')", "sql dml insert"},
+		{"UPDATE users SET password = 'x' WHERE 1=1", "sql dml update"},
+		{"ALTER TABLE orders ADD COLUMN backdoor TEXT", "sql dml alter"},
+		{"TRUNCATE TABLE sessions", "sql dml truncate"},
+		{"CREATE TABLE evil_table (id INT)", "sql dml create"},
 	}
 	for _, tt := range invalid {
 		if r := v.Validate(tt.prompt); r.Valid {
