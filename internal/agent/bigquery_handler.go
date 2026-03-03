@@ -212,15 +212,16 @@ func (h *BigQueryHandler) getSchemaSection(ctx context.Context, datasetID string
 
 // BigQueryHandler orchestrates the NL→SQL→execute pipeline
 type BigQueryHandler struct {
-	agent        LLMRunner
-	bq           *service.BigQueryService
-	piiDetector  *security.PIIDetector
-	promptVal    *security.PromptValidator
-	sqlVal       *security.SQLValidator
-	costTracker  *security.CostTracker
-	dataMasker   *security.DataMasker
-	auditLogger  *security.AuditLogger
-	schemaCache  *schemaCache
+	agent       LLMRunner
+	bq          *service.BigQueryService
+	piiDetector *security.PIIDetector
+	promptVal   *security.PromptValidator
+	sqlVal      *security.SQLValidator
+	costTracker *security.CostTracker
+	dataMasker  *security.DataMasker
+	auditLogger *security.AuditLogger
+	schemaCache *schemaCache
+	respCache   *responseCache
 }
 
 // NewBigQueryHandler creates a handler with all security components wired in
@@ -244,6 +245,7 @@ func NewBigQueryHandler(
 		costTracker: costTracker,
 		dataMasker:  dataMasker,
 		schemaCache: newSchemaCache(schemaCacheTTL),
+		respCache:   newResponseCache(schemaCacheTTL),
 		auditLogger: auditLogger,
 	}
 }
@@ -252,6 +254,11 @@ func NewBigQueryHandler(
 // forcing the next request to re-fetch from BigQuery.
 func (h *BigQueryHandler) InvalidateSchemaCache(datasetID string) {
 	h.schemaCache.invalidate(datasetID)
+}
+
+// FlushResponseCache clears all cached agent responses.
+func (h *BigQueryHandler) FlushResponseCache() {
+	h.respCache.flush()
 }
 
 // Handle processes an agent request for BigQuery.
@@ -302,6 +309,22 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	}
 	metadata["prompt_validation"] = "passed"
 
+	// Resolve datasetID early — needed for cache key and schema section.
+	datasetID := ""
+	if req.DatasetID != nil {
+		datasetID = *req.DatasetID
+	}
+
+	// 2a. Response cache check (non-streaming, non-dry_run only)
+	cacheKey := responseCacheKey(req.Prompt, datasetID, promptStyle)
+	if !req.DryRun {
+		if cached, ok := h.respCache.get(cacheKey); ok {
+			cached.AgentMetadata["response_cache"] = "hit"
+			return cached, nil
+		}
+		metadata["response_cache"] = "miss"
+	}
+
 	// 3. Build tools (BQListDatasetsTool is filtered to squad's datasets)
 	if req.DryRun {
 		excludedTools = append(excludedTools, "execute_bigquery_sql")
@@ -319,10 +342,6 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	}, excludedTools)
 
 	// 4. Build system prompt: persona base + cached schema section
-	datasetID := ""
-	if req.DatasetID != nil {
-		datasetID = *req.DatasetID
-	}
 	systemPrompt := SystemPromptStyle(promptStyle) + h.getSchemaSection(ctx, datasetID)
 
 	// 5. Run agent loop
@@ -416,14 +435,18 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	metadata["total_time_ms"] = execTimeMs
 	metadata["llm_time_ms"] = llmMs
 
-	return &models.AgentResponse{
+	resp := &models.AgentResponse{
 		Status:          "success",
 		Prompt:          req.Prompt,
 		GeneratedSQL:    sqlPtr,
 		ExecutionResult: execResult,
 		AgentMetadata:   metadata,
 		Answer:          answerPtr,
-	}, nil
+	}
+	if !req.DryRun {
+		h.respCache.set(cacheKey, resp)
+	}
+	return resp, nil
 }
 
 // HandleStream processes an agent request for BigQuery with SSE event emission.
