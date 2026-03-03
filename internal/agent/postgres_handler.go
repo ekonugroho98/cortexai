@@ -192,6 +192,10 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	// 3. Build PG tools
 	if req.DryRun {
 		excludedTools = append(excludedTools, "execute_postgres_sql")
+		if dbName != "" {
+			// Schema already injected into system prompt — no need for inspection tools.
+			excludedTools = append(excludedTools, "list_postgres_tables", "get_postgres_schema", "get_postgres_sample_data")
+		}
 	}
 	pgTools := filterTools([]tools.Tool{
 		tools.PGListDatabasesTool(allowedDatabases),
@@ -377,6 +381,10 @@ func (h *PostgresHandler) HandleStream(ctx context.Context, req *models.AgentReq
 	// 3. Build PG tools
 	if req.DryRun {
 		excludedTools = append(excludedTools, "execute_postgres_sql")
+		if dbName != "" {
+			// Schema already injected into system prompt — no need for inspection tools.
+			excludedTools = append(excludedTools, "list_postgres_tables", "get_postgres_schema", "get_postgres_sample_data")
+		}
 	}
 	pgTools := filterTools([]tools.Tool{
 		tools.PGListDatabasesTool(allowedDatabases),
