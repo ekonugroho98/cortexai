@@ -26,7 +26,8 @@ type PostgresHandler struct {
 	costTracker *security.PGCostTracker
 	dataMasker  *security.DataMasker
 	auditLogger *security.AuditLogger
-	schemaCache *schemaCache // reuse existing type from bigquery_handler.go (same package)
+	schemaCache *schemaCache  // reuse existing type from bigquery_handler.go (same package)
+	respCache   *responseCache // reuse existing type from bigquery_handler.go (same package)
 }
 
 // NewPostgresHandler creates a handler with all security components wired in.
@@ -51,12 +52,18 @@ func NewPostgresHandler(
 		dataMasker:  dataMasker,
 		auditLogger: auditLogger,
 		schemaCache: newSchemaCache(schemaCacheTTL),
+		respCache:   newResponseCache(schemaCacheTTL),
 	}
 }
 
 // InvalidateSchemaCache removes the cached schema for the given cache key (squadID:dbName).
 func (h *PostgresHandler) InvalidateSchemaCache(cacheKey string) {
 	h.schemaCache.invalidate(cacheKey)
+}
+
+// FlushResponseCache clears all cached agent responses.
+func (h *PostgresHandler) FlushResponseCache() {
+	h.respCache.flush()
 }
 
 // PGSchemaClosingInstruction is the directive appended to the pre-injected schema
@@ -189,6 +196,16 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	}
 	metadata["prompt_validation"] = "passed"
 
+	// 2a. Response cache check (non-streaming, non-dry_run only)
+	pgCacheKey := responseCacheKey(req.Prompt, dbName, promptStyle)
+	if !req.DryRun {
+		if cached, ok := h.respCache.get(pgCacheKey); ok {
+			cached.AgentMetadata["response_cache"] = "hit"
+			return cached, nil
+		}
+		metadata["response_cache"] = "miss"
+	}
+
 	// 3. Build PG tools
 	if req.DryRun {
 		excludedTools = append(excludedTools, "execute_postgres_sql")
@@ -302,14 +319,18 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	metadata["total_time_ms"] = execTimeMs
 	metadata["llm_time_ms"] = llmMs
 
-	return &models.AgentResponse{
+	pgResp := &models.AgentResponse{
 		Status:          "success",
 		Prompt:          req.Prompt,
 		GeneratedSQL:    sqlPtr,
 		ExecutionResult: execResult,
 		AgentMetadata:   metadata,
 		Answer:          answerPtr,
-	}, nil
+	}
+	if !req.DryRun {
+		h.respCache.set(pgCacheKey, pgResp)
+	}
+	return pgResp, nil
 }
 
 // HandleStream processes an agent request for PostgreSQL with SSE event emission.
