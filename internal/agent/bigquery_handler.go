@@ -80,6 +80,11 @@ SELECT ...
 7. For JOIN queries: use get_bigquery_sample_data to verify join key values match before executing
 8. Always respond in the same language as the user's prompt. If the user writes in Indonesian, respond in Indonesian. If in English, respond in English.`
 
+// BQSchemaClosingInstruction is the directive appended to the pre-injected schema
+// block, instructing the LLM to skip redundant schema/table tool calls and to
+// execute SQL at most once.
+const BQSchemaClosingInstruction = "\nIMPORTANT: All table schemas are already provided above. DO NOT call list_tables or get_bigquery_schema — go directly to writing and executing SQL. You should need at most 1 execute call."
+
 // getSchemaSection returns a cached schema-only section pre-loaded from BigQuery.
 // It returns only the schema portion (no base prompt) so different personas can
 // prepend their own base prompt via SystemPromptStyle(). Cache TTL is 5 minutes.
@@ -127,7 +132,7 @@ func (h *BigQueryHandler) getSchemaSection(ctx context.Context, datasetID string
 			sb.WriteString("\n")
 		}
 
-		sb.WriteString("\nSince schemas are already provided above, you can skip list_tables and get_bigquery_schema tool calls. Go directly to get_bigquery_sample_data for JOIN queries, then write and execute the SQL.")
+		sb.WriteString(BQSchemaClosingInstruction)
 
 		schema := sb.String()
 		h.schemaCache.set(datasetID, schema)
