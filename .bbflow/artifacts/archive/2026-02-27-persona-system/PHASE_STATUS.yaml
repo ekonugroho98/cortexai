@@ -1,0 +1,99 @@
+workflow:
+  feature_name: "Persona System + Per-Persona AI Model Selection"
+  mode: "BROWNFIELD"
+  complexity: "COMPLEX"
+  platform: "backend"
+  started_at: "2026-02-27T00:00:00Z"
+
+current:
+  phase: "complete"
+  status: "complete"
+  active_spec: "DELTA_SPEC.md"
+  next_action: "Feature archived. Start new feature with /bb-flow:spec"
+
+phases:
+  spec:
+    status: "complete"
+    started_at: "2026-02-27T00:00:00Z"
+    completed_at: "2026-02-27T00:01:00Z"
+    artifacts_generated:
+      - "DELTA_SPEC.md"
+      - "CODEBASE_MAP.md"
+      - "IMPACT_ANALYSIS.md"
+      - "REQUIREMENTS.md"
+    user_approved: true
+    approved_at: "2026-02-27T00:01:00Z"
+    revision_count: 0
+    revision_history: []
+
+  plan:
+    status: "complete"
+    started_at: "2026-02-27T00:02:00Z"
+    completed_at: "2026-02-27T00:10:00Z"
+    artifacts_generated:
+      - "PLAN.yaml"
+      - "PLAN_SUMMARY.md"
+      - "DESIGN.md"
+      - "ARCHITECTURE.md"
+    user_approved: true
+    approved_at: "2026-02-27T00:11:00Z"
+    revision_count: 0
+    revision_history: []
+
+  execute:
+    status: "complete"
+    started_at: "2026-02-27T00:12:00Z"
+    completed_at: "2026-02-27T01:00:00Z"
+    tasks_total: 11
+    tasks_completed: 11
+    tasks_in_progress: 0
+    tasks_blocked: 0
+    current_task_id: null
+    revision_count: 0
+    revision_history: []
+
+  verify:
+    status: "complete"
+    started_at: "2026-02-27T10:00:00Z"
+    completed_at: "2026-02-27T10:05:00Z"
+    attempt_count: 1
+    consecutive_failures: 0
+    circuit_breaker_override: false
+    failure_history: []
+    artifacts_generated:
+      - "VERIFICATION_REPORT.md"
+    test_results:
+      unit_tests: "pass"
+      integration_tests: "skipped"
+      regression_tests: "pass"
+      code_quality: "pass"
+      spec_compliance: "pass"
+      rule_compliance: "skipped"
+
+  complete:
+    status: "complete"
+    started_at: "2026-02-27T10:30:00Z"
+    completed_at: "2026-02-27T10:30:00Z"
+    artifacts_generated:
+      - "COMPLETION_SUMMARY.md"
+    archive_location: ".bbflow/artifacts/archive/2026-02-27-persona-system/"
+
+artifacts:
+  permanent:
+    - path: "DELTA_SPEC.md"
+      purpose: "Change specification"
+      created_at: "2026-02-27T00:00:00Z"
+      needed_until: "complete"
+    - path: "REQUIREMENTS.md"
+      purpose: "Detailed requirements"
+      created_at: "2026-02-27T00:00:00Z"
+      needed_until: "complete"
+  temporary:
+    - path: "CODEBASE_MAP.md"
+      purpose: "Affected files map"
+      created_at: "2026-02-27T00:00:00Z"
+      needed_until: "plan"
+    - path: "IMPACT_ANALYSIS.md"
+      purpose: "Impact assessment"
+      created_at: "2026-02-27T00:00:00Z"
+      needed_until: "plan"

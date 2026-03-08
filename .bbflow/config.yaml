@@ -1,0 +1,40 @@
+version: "1.0"
+framework: "SDD MVP"
+
+project:
+  name: "cortexai"
+  type: "backend"
+  tech_stack:
+    primary: "go"
+    framework: "chi"
+    architecture: "layered"
+  description: "Enterprise Intelligence Platform — HTTP API for querying BigQuery and Elasticsearch using natural language via LLM"
+
+team:
+  size: "small"
+  developers: 2-5
+
+generator:
+  tool: null
+
+conventions:
+  naming:
+    files: "snake_case"
+    packages: "lowercase"
+    functions: "CamelCase"
+    variables: "camelCase"
+  testing:
+    framework: "stdlib"
+    pattern: "*_test.go"
+    coverage_target: 80
+  code_style:
+    formatter: "gofmt"
+    linter: "golangci-lint"
+    line_length: 120
+
+environments:
+  - name: "development"
+    config: "config/cortexai.json"
+  - name: "production"
+    config: "env vars"
+    deployment: "kubernetes"

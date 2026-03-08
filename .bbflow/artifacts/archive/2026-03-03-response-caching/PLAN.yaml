@@ -1,0 +1,315 @@
+metadata:
+  feature_name: "Response Cache untuk Query Identik"
+  spec_id: "response-caching"
+  mode: "GREENFIELD"
+  complexity: "SIMPLE"
+  platform: "backend"
+  created_at: "2026-03-03T00:00:00+07:00"
+  spec_file: "SPEC.md"
+
+approach: >
+  Add a responseCache struct (mirroring existing schemaCache pattern) to the agent package,
+  wire one instance each into BigQueryHandler and PostgresHandler, check/set the cache in
+  Handle() after security passes but before schema fetch, and expose a
+  DELETE /api/v1/cache/responses endpoint for manual invalidation.
+
+risks:
+  - id: R-01
+    description: "Cache key collision via sha256"
+    level: LOW
+    mitigation: "sha256 collision probability is negligible for practical prompts"
+  - id: R-02
+    description: "Stale data if underlying dataset changes within TTL window"
+    level: LOW
+    mitigation: "Same risk already accepted for schemaCache (same 5-min TTL). Invalidation endpoint available."
+  - id: R-03
+    description: "Memory growth if many unique prompts flood within TTL"
+    level: LOW
+    mitigation: "Responses are small (~KB). TTL-based expiry limits growth. No extra action needed."
+
+tasks:
+  - id: 1
+    status: "pending"
+    status_note: ""
+    name: "Add responseCache struct with get/set/flush methods"
+    description: >
+      Define responseCache in internal/agent/bigquery_handler.go (same package as postgres_handler,
+      so both handlers can reuse it). Mirror the existing schemaCache pattern exactly.
+      Add flush() method for invalidation endpoint.
+      Also add a package-level cacheKey() helper function.
+
+      Struct:
+        type responseCacheEntry struct { response *models.AgentResponse; expiresAt time.Time }
+        type responseCache struct { mu sync.RWMutex; store map[string]responseCacheEntry; ttl time.Duration }
+        func newResponseCache(ttl time.Duration) *responseCache
+        func (c *responseCache) get(key string) (*models.AgentResponse, bool)
+        func (c *responseCache) set(key string, resp *models.AgentResponse)
+        func (c *responseCache) flush()
+
+      Helper:
+        func responseCacheKey(prompt, datasetID, promptStyle string) string
+          — returns fmt.Sprintf("%x", sha256.Sum256([]byte(prompt+"|"+datasetID+"|"+promptStyle)))
+
+      Import needed: "crypto/sha256" + "fmt" (already imported).
+    spec_requirements: ["REQ-001", "REQ-002", "REQ-003", "REQ-009"]
+    layer: "data"
+    action: "modify"
+    files:
+      - "internal/agent/bigquery_handler.go"
+      - "internal/agent/bigquery_handler_test.go"
+
+    output_contract: >
+      newResponseCache(ttl) *responseCache
+      responseCache.get(key string) (*models.AgentResponse, bool)
+      responseCache.set(key string, resp *models.AgentResponse)
+      responseCache.flush()
+      responseCacheKey(prompt, datasetID, promptStyle string) string
+
+    tdd_steps:
+      test_case:
+        name: "TestResponseCache_HitMiss"
+        class: "bigquery_handler_test"
+        given: "A responseCache with 5-minute TTL and one entry set"
+        when: "get() is called with the same key immediately after set()"
+        then: "Returns the stored *AgentResponse and ok=true (hit)"
+
+      verify_fails:
+        command: "go test ./internal/agent/... -run TestResponseCache_HitMiss -v"
+        expected_failure: "undefined: responseCache or undefined: newResponseCache"
+
+      write_implementation: >
+        In internal/agent/bigquery_handler.go, add after the existing schemaCache block:
+        1. responseCacheEntry struct with response *models.AgentResponse + expiresAt time.Time
+        2. responseCache struct with mu sync.RWMutex, store map[string]responseCacheEntry, ttl time.Duration
+        3. newResponseCache(ttl) — returns &responseCache{store: make(map[string]responseCacheEntry), ttl: ttl}
+        4. get() — RLock, check key exists and !time.Now().After(expiresAt), return (response, true) or ("", false)
+        5. set() — Lock, store entry with time.Now().Add(ttl)
+        6. flush() — Lock, replace store with make(map[string]responseCacheEntry)
+        7. responseCacheKey() — sha256.Sum256([]byte(prompt+"|"+datasetID+"|"+promptStyle)), return fmt.Sprintf("%x", sum)
+        Add "crypto/sha256" to imports (other imports already present).
+
+      verify_passes:
+        command: "go test ./internal/agent/... -run TestResponseCache_HitMiss -v"
+        expected_output: "PASS"
+
+      commit: "feat(agent): add responseCache struct with get/set/flush and responseCacheKey helper"
+
+  - id: 2
+    status: "pending"
+    status_note: ""
+    name: "Add TTL expiry, dry_run, and error non-caching tests"
+    description: >
+      Add three more tests to bigquery_handler_test.go to cover REQ-003, REQ-004, REQ-005:
+      - TestResponseCache_TTLExpiry: set with 50ms TTL, sleep 60ms, get → miss
+      - TestResponseCache_DryRunNotCached: simulate Handle() skipping set for dry_run=true; get → miss
+      - TestResponseCache_ErrorNotCached: simulate Handle() skipping set when status != "success"; get → miss
+
+      These are pure struct/helper tests — no handler wiring needed yet.
+    spec_requirements: ["REQ-003", "REQ-004", "REQ-005"]
+    layer: "test"
+    action: "modify"
+    files:
+      - "internal/agent/bigquery_handler_test.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestResponseCache_TTLExpiry"
+        class: "bigquery_handler_test"
+        given: "A responseCache with 50ms TTL and one entry set"
+        when: "get() is called after sleeping 60ms"
+        then: "Returns ok=false (expired entry is treated as cache miss)"
+
+      verify_fails:
+        command: "go test ./internal/agent/... -run 'TestResponseCache_(TTLExpiry|DryRunNotCached|ErrorNotCached)' -v"
+        expected_failure: "FAIL: test function not found"
+
+      write_implementation: >
+        In internal/agent/bigquery_handler_test.go, add three test functions after TestResponseCache_HitMiss:
+
+        TestResponseCache_TTLExpiry:
+          c := newResponseCache(50 * time.Millisecond)
+          c.set("k", &models.AgentResponse{Status: "success"})
+          time.Sleep(60 * time.Millisecond)
+          _, ok := c.get("k"); if ok { t.Fatal("expected miss after expiry") }
+
+        TestResponseCache_DryRunNotCached:
+          c := newResponseCache(time.Minute)
+          key := responseCacheKey("show users", "mydb", "executive")
+          // Simulate Handle(): for dry_run=true, set is NOT called
+          _, ok := c.get(key)
+          if ok { t.Fatal("dry_run responses must not be cached (set was never called)") }
+
+        TestResponseCache_ErrorNotCached:
+          c := newResponseCache(time.Minute)
+          key := responseCacheKey("show users", "mydb", "executive")
+          errResp := &models.AgentResponse{Status: "error"}
+          // Simulate Handle(): only call set if status == "success"
+          if errResp.Status == "success" { c.set(key, errResp) }
+          _, ok := c.get(key)
+          if ok { t.Fatal("error responses must not be cached") }
+
+      verify_passes:
+        command: "go test ./internal/agent/... -run 'TestResponseCache_(TTLExpiry|DryRunNotCached|ErrorNotCached)' -v"
+        expected_output: "PASS"
+
+      commit: "test(agent): add TTLExpiry, DryRunNotCached, ErrorNotCached response cache tests"
+
+  - id: 3
+    status: "pending"
+    status_note: ""
+    name: "Wire responseCache into BigQueryHandler + add cache check in Handle()"
+    description: >
+      Modify BigQueryHandler struct and Handle() method in internal/agent/bigquery_handler.go:
+
+      1. Add field to BigQueryHandler struct:
+           respCache *responseCache
+
+      2. In NewBigQueryHandler(), initialize it:
+           respCache: newResponseCache(schemaCacheTTL),
+
+      3. Add FlushResponseCache() method:
+           func (h *BigQueryHandler) FlushResponseCache() { h.respCache.flush() }
+
+      4. In Handle(), after step 2 (prompt validation passes), before step 3 (build tools):
+           a. Compute key: key := responseCacheKey(req.Prompt, datasetID, promptStyle)
+              Note: datasetID is "" when req.DatasetID is nil — same as later code.
+           b. If NOT dry_run: check cache
+              if cached, ok := h.respCache.get(key); ok {
+                  cached.AgentMetadata["response_cache"] = "hit"
+                  return cached, nil
+              }
+              metadata["response_cache"] = "miss"
+
+      5. At the end of Handle(), just before `return &models.AgentResponse{...}, nil`:
+           if resp.Status == "success" && !req.DryRun {
+               h.respCache.set(key, resp)
+           }
+           But since the final return constructs a new AgentResponse inline, set the cache
+           AFTER constructing resp, before returning. Capture it in a local variable first.
+
+      IMPORTANT: datasetID variable is declared at line ~264 (AFTER the cache check point).
+      For the cache key, compute datasetID inline:
+        datasetID := ""; if req.DatasetID != nil { datasetID = *req.DatasetID }
+      Then the existing `datasetID := ""` declaration at line ~264 will conflict.
+      Solution: compute datasetID early (move or pre-compute), or use a different local name.
+      Preferred: move the datasetID computation to before the cache check, and remove the
+      duplicate declaration at line ~264. This is a clean refactor within the same function.
+    spec_requirements: ["REQ-001", "REQ-006", "REQ-008", "REQ-010"]
+    layer: "data"
+    action: "modify"
+    files:
+      - "internal/agent/bigquery_handler.go"
+
+    output_contract: >
+      BigQueryHandler.FlushResponseCache()
+      BigQueryHandler.respCache field set in NewBigQueryHandler
+      Handle() returns cached response on hit with agent_metadata["response_cache"]="hit"
+
+    manual_verification: >
+      Run: go build ./...
+      Verify no compile errors.
+      Run: go test ./internal/agent/... -v
+      Verify all existing tests still pass (no regressions).
+      Verify TestResponseCache_* tests pass.
+      Check that Handle() returns early on cache hit (add a log line temporarily if needed).
+
+  - id: 4
+    status: "pending"
+    status_note: ""
+    name: "Wire responseCache into PostgresHandler + add cache check in Handle()"
+    description: >
+      Mirror Task 3 for internal/agent/postgres_handler.go.
+
+      1. Add field to PostgresHandler struct:
+           respCache *responseCache
+
+      2. In NewPostgresHandler(), initialize:
+           respCache: newResponseCache(schemaCacheTTL),
+
+      3. Add method:
+           func (h *PostgresHandler) FlushResponseCache() { h.respCache.flush() }
+
+      4. In PostgresHandler.Handle(), after prompt validation passes:
+           a. Compute key: key := responseCacheKey(req.Prompt, dbName, promptStyle)
+              (dbName is already available as a parameter — no conflict)
+           b. If NOT dry_run: check cache, add metadata["response_cache"] = "hit"/"miss"
+
+      5. Before final return: if status == "success" && !dry_run → cache.set(key, resp)
+         Same pattern as BigQueryHandler Task 3 step 5.
+    spec_requirements: ["REQ-001", "REQ-006", "REQ-008", "REQ-010"]
+    layer: "data"
+    action: "modify"
+    files:
+      - "internal/agent/postgres_handler.go"
+
+    output_contract: >
+      PostgresHandler.FlushResponseCache()
+      PostgresHandler.respCache field set in NewPostgresHandler
+
+    manual_verification: >
+      Run: go build ./...
+      Verify no compile errors.
+      Run: go test ./internal/agent/... -v
+      All tests pass including existing PG handler tests.
+
+  - id: 5
+    status: "pending"
+    status_note: ""
+    name: "Add DELETE /api/v1/cache/responses endpoint and route"
+    description: >
+      Two files to change:
+
+      A. internal/handler/cache.go — add handler method:
+           func (h *CacheHandler) FlushResponseCache(w http.ResponseWriter, r *http.Request) {
+               if h.bqHandler != nil { h.bqHandler.FlushResponseCache() }
+               if h.pgHandler != nil { h.pgHandler.FlushResponseCache() }
+               models.WriteJSON(w, http.StatusOK, map[string]interface{}{
+                   "status":  "ok",
+                   "message": "response cache flushed",
+               })
+           }
+
+      B. internal/server/routes.go — in the cache management block (around line 297-302):
+           r.With(middleware.RequireRole(models.RoleAdmin)).
+               Delete("/cache/responses", cacheH.FlushResponseCache)
+    spec_requirements: ["REQ-007"]
+    layer: "di"
+    action: "modify"
+    files:
+      - "internal/handler/cache.go"
+      - "internal/server/routes.go"
+
+    output_contract: null
+
+    manual_verification: >
+      Run: go build ./...
+      Verify no compile errors.
+      Run: go test ./... -v
+      All 139+ tests pass.
+      Optional: curl -X DELETE http://localhost:8080/api/v1/cache/responses -H "X-API-Key: <admin_key>"
+      Expect: 200 {"status":"ok","message":"response cache flushed"}
+
+execution_order:
+  - phase: 1
+    name: "Struct + Tests"
+    tasks: [1, 2]
+    note: "TDD: write tests first (Task 1 test, Task 2 tests), then implement struct (Task 1 impl)"
+  - phase: 2
+    name: "Handler Wiring"
+    tasks: [3, 4]
+    note: "Can be done in parallel — BQ and PG handlers are independent"
+  - phase: 3
+    name: "HTTP Endpoint"
+    tasks: [5]
+    note: "Depends on FlushResponseCache() methods from Tasks 3 and 4"
+
+summary:
+  total_tasks: 5
+  confidence: "HIGH"
+  notes: >
+    responseCache struct mirrors schemaCache exactly — low risk of new bugs.
+    All 4 tests target the struct directly (no mock LLM needed).
+    Handler wiring is a small, localized change in each Handle() method.
+    schemaCacheTTL is already wired into constructors — no config changes needed.

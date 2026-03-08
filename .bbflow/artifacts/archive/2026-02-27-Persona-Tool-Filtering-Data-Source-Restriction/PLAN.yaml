@@ -1,0 +1,238 @@
+metadata:
+  spec_id: "persona-tool-filtering"
+  feature_name: "Persona Tool Filtering + Data Source Restriction"
+  spec_file: ".bbflow/artifacts/workspace/persona-tool-filtering/DELTA_SPEC.md"
+  mode: "BROWNFIELD"
+  complexity: "SIMPLE"
+  platform: "backend"
+  created_at: "2026-02-27T11:00:00Z"
+
+design:
+  files_to_modify: 4
+  files_to_create: 1  # internal/handler/agent_test.go (new test file)
+  reference: ".bbflow/artifacts/workspace/persona-tool-filtering/DESIGN.md"
+
+risks:
+  - id: "RISK-01"
+    name: "Handle() / HandleStream() signature change"
+    level: "LOW"
+    impact: "All callers must pass new excludedTools param"
+    mitigation: "Only callers are in handler/agent.go — updated in TASK-03. Nil/empty = no filtering (backward compat)."
+
+  - id: "RISK-02"
+    name: "resolvePersona() return type change (2→3 values)"
+    level: "LOW"
+    impact: "All callers must destructure 3 return values"
+    mitigation: "Only called in QueryAgent() and QueryAgentStream() — both updated in TASK-03."
+
+tasks:
+  - id: "TASK-01"
+    name: "Extend PersonaConfig with ExcludedTools and AllowedDataSources"
+    description: |
+      Add two optional fields to PersonaConfig struct in internal/config/config.go.
+      Both fields use omitempty — existing configs without these fields remain valid
+      and will have nil slices (backward compatible by design).
+    layer: "config"
+    status: "done"
+    status_note: "internal/config/config.go: +ExcludedTools []string, +AllowedDataSources []string. go build ./internal/config/... PASS"
+    dependencies: []
+    spec_requirements: ["REQ-001", "REQ-002", "REQ-005", "REQ-006"]
+    output_contract: "config.PersonaConfig.ExcludedTools []string; config.PersonaConfig.AllowedDataSources []string"
+    acceptance_criteria:
+      - "PersonaConfig has ExcludedTools []string with `json:\"excluded_tools,omitempty\"`"
+      - "PersonaConfig has AllowedDataSources []string with `json:\"allowed_data_sources,omitempty\"`"
+      - "go build ./... passes with zero errors"
+      - "Existing personas (developer, app_support) with no new fields compile and behave identically"
+    tdd_steps:
+      test_case:
+        given: "A PersonaConfig JSON without excluded_tools or allowed_data_sources fields"
+        when: "json.Unmarshal into PersonaConfig"
+        then: "ExcludedTools is nil, AllowedDataSources is nil — unmarshal succeeds, no panic"
+      test_file: "verified via go build and existing tests"
+      test_command: "go build ./... && go test ./internal/config/..."
+    manual_verification:
+      - "go build ./... passes"
+    implementation_guidelines:
+      universal: "Keep it minimal — two field additions only, no logic changes in this task"
+      specific_sections:
+        - "Use omitempty on both fields so JSON output omits them when nil"
+        - "No default values — nil means unrestricted (enforced by consumers in TASK-02/03)"
+        - "Field order: append after existing MaxTokens field"
+    verification_checklist:
+      - "[ ] ExcludedTools []string `json:\"excluded_tools,omitempty\"` in PersonaConfig"
+      - "[ ] AllowedDataSources []string `json:\"allowed_data_sources,omitempty\"` in PersonaConfig"
+      - "[ ] go build ./... clean (zero errors)"
+      - "[ ] go test ./internal/config/... passes (if test file exists)"
+
+  - id: "TASK-02"
+    name: "Add filterTools() + update BigQueryHandler.Handle() and HandleStream()"
+    description: |
+      In internal/agent/bigquery_handler.go:
+      1. Add private filterTools(ts []tools.Tool, excluded []string) []tools.Tool
+         — builds an excludedSet map, returns new slice without excluded tools
+         — if excluded is nil/empty, returns ts unchanged (O(1) fast path)
+      2. Add excludedTools []string param to Handle() (append at end)
+      3. Add excludedTools []string param to HandleStream() (append at end, before emitFn or after — keep consistent)
+      4. In both methods, call filterTools(bqTools, excludedTools) before passing to runner.Run()/RunWithEmit()
+    layer: "agent"
+    status: "done"
+    status_note: "bigquery_handler.go: +filterTools(), Handle()+excludedTools, HandleStream()+excludedTools. go build PASS"
+    dependencies: ["TASK-01"]
+    spec_requirements: ["REQ-003", "REQ-005"]
+    output_contract: |
+      agent.BigQueryHandler.Handle(ctx, req, apiKey, allowedDatasets, runner, promptStyle, excludedTools []string) (*models.AgentResponse, error)
+      agent.BigQueryHandler.HandleStream(ctx, req, apiKey, allowedDatasets, runner, promptStyle, emitFn EmitFn, excludedTools []string) error
+    acceptance_criteria:
+      - "filterTools(tools, nil) returns all tools unchanged"
+      - "filterTools(tools, [\"get_bigquery_sample_data\"]) returns 4 tools with that tool absent"
+      - "filterTools(tools, all_names) returns empty slice"
+      - "Handle() signature includes excludedTools []string as last param"
+      - "HandleStream() signature includes excludedTools []string consistently"
+      - "runner.Run() called with filtered tool list (not original bqTools)"
+      - "go test ./internal/agent/... PASS (all 44 existing tests + new filterTools tests)"
+    tdd_steps:
+      test_case:
+        given: "A slice of 5 BQ tools and excludedTools=[\"get_bigquery_sample_data\"]"
+        when: "filterTools(tools, excludedTools) is called"
+        then: "Returns slice of 4 tools; none has Name == \"get_bigquery_sample_data\""
+      test_file: "internal/agent/bigquery_handler_test.go"
+      test_command: "go test ./internal/agent/... -run TestFilterTools -v"
+    implementation_guidelines:
+      universal: "filterTools is package-private (lowercase f) — not exported"
+      specific_sections:
+        - "Build excludedSet as map[string]struct{} for O(1) lookup"
+        - "Use t.Name (direct struct field on tools.Tool) for comparison"
+        - "Return new slice — do not mutate input slice"
+        - "Nil/empty excluded → early return ts (no allocation)"
+        - "excludedTools is the last param on Handle() to minimize call-site diff"
+    verification_checklist:
+      - "[ ] filterTools(tools, nil) == tools (unchanged)"
+      - "[ ] filterTools(tools, [\"get_bigquery_sample_data\"]) removes exactly that tool"
+      - "[ ] filterTools(tools, allNames) returns empty slice (len==0)"
+      - "[ ] Handle() last param is excludedTools []string"
+      - "[ ] HandleStream() has excludedTools []string param (consistent position)"
+      - "[ ] bqTools filtered BEFORE runner.Run() / runner.RunWithEmit()"
+      - "[ ] go test ./internal/agent/... PASS (zero regressions)"
+
+  - id: "TASK-03"
+    name: "Update AgentHandler: resolvePersona, checkDataSourceAllowed, QueryAgent, QueryAgentStream"
+    description: |
+      In internal/handler/agent.go:
+      1. Extend resolvePersona() to return (agent.LLMRunner, string, config.PersonaConfig)
+         — return pc (PersonaConfig) or zero-value config.PersonaConfig{} for unknown personas
+      2. Add checkDataSourceAllowed(pc config.PersonaConfig, dataSource string) error
+         — nil/empty AllowedDataSources → return nil (allow all)
+         — dataSource found in list → return nil
+         — otherwise → return descriptive error (REQ-008 format)
+      3. Update QueryAgent():
+         — destructure resolvePersona() into (runner, promptStyle, pc)
+         — after source := resolveSource(...), call checkDataSourceAllowed(pc, source)
+         — on error: models.WriteError(w, http.StatusForbidden, err.Error()); return
+         — pass pc.ExcludedTools to bqHandler.Handle()
+      4. Update QueryAgentStream():
+         — same resolvePersona() destructuring
+         — data source check BEFORE the existing ES 501 early return
+         — pass pc.ExcludedTools to bqHandler.HandleStream()
+    layer: "handler"
+    status: "done"
+    status_note: "handler/agent.go: resolvePersona() returns 3 values, +checkDataSourceAllowed(), QueryAgent()+403, QueryAgentStream()+403+restructure. go build PASS"
+    dependencies: ["TASK-01", "TASK-02"]
+    spec_requirements: ["REQ-004", "REQ-006", "REQ-008"]
+    output_contract: null
+    acceptance_criteria:
+      - "resolvePersona() returns (agent.LLMRunner, string, config.PersonaConfig) — 3 values"
+      - "checkDataSourceAllowed with nil AllowedDataSources returns nil"
+      - "checkDataSourceAllowed with source in list returns nil"
+      - "checkDataSourceAllowed with source not in list returns error containing source name and available list"
+      - "QueryAgent() returns HTTP 403 JSON when data source is blocked"
+      - "QueryAgent() passes pc.ExcludedTools to bqHandler.Handle()"
+      - "QueryAgentStream() HTTP 403 on blocked data source (before ES 501 check)"
+      - "QueryAgentStream() passes pc.ExcludedTools to bqHandler.HandleStream()"
+      - "go build ./... clean"
+    tdd_steps:
+      test_case:
+        given: "A PersonaConfig with AllowedDataSources=[\"bigquery\"] and dataSource=\"elasticsearch\""
+        when: "checkDataSourceAllowed(pc, \"elasticsearch\") is called"
+        then: "Returns non-nil error containing 'elasticsearch' and '[bigquery]' in message"
+      test_file: "internal/handler/agent_test.go (create if not exists)"
+      test_command: "go test ./internal/handler/... -run TestCheckDataSourceAllowed -v"
+    implementation_guidelines:
+      universal: "Minimize changes — only update what resolvePersona callers need"
+      context: "brownfield — preserve all existing behavior for nil/empty persona config"
+      specific_sections:
+        - "Zero-value PersonaConfig{} is the safe default — nil AllowedDataSources means unrestricted"
+        - "HTTP 403 (Forbidden) for data source restriction — not 401, not 500"
+        - "Error message format: \"data source 'X' is not available for your persona. Available: Y\" (REQ-008)"
+        - "Use models.WriteError(w, http.StatusForbidden, msg) for consistency with other error responses"
+        - "In QueryAgentStream: data source check BEFORE the ES 501 check (line ~177 in current file)"
+        - "In QueryAgent: data source check after source is resolved, before the routing switch"
+    verification_checklist:
+      - "[ ] resolvePersona() has 3 return values — all 2 call sites updated"
+      - "[ ] checkDataSourceAllowed(pc{}, any) returns nil (zero-value = unrestricted)"
+      - "[ ] checkDataSourceAllowed blocks with clear message"
+      - "[ ] QueryAgent() HTTP 403 JSON on blocked source"
+      - "[ ] QueryAgentStream() HTTP 403 before ES 501 check"
+      - "[ ] pc.ExcludedTools passed to Handle() and HandleStream()"
+      - "[ ] go build ./... clean"
+
+  - id: "TASK-04"
+    name: "Unit tests (filterTools + checkDataSourceAllowed) + update cortexai.example.json"
+    description: |
+      1. Add table-driven tests for filterTools in internal/agent/bigquery_handler_test.go
+      2. Create internal/handler/agent_test.go with tests for checkDataSourceAllowed
+      3. Update config/cortexai.example.json: add excluded_tools and allowed_data_sources to executive persona
+    layer: "test+config"
+    status: "done"
+    status_note: "bigquery_handler_test.go: +6 filterTools tests. handler/agent_test.go: +6 checkDataSourceAllowed tests. cortexai.example.json executive updated. go test ./... PASS"
+    dependencies: ["TASK-01", "TASK-02", "TASK-03"]
+    spec_requirements: ["REQ-007", "REQ-009", "REQ-010"]
+    output_contract: null
+    acceptance_criteria:
+      - "TestFilterTools covers: nil excluded, single excluded, multiple excluded, all excluded"
+      - "TestCheckDataSourceAllowed covers: nil AllowedDataSources, source allowed, source blocked"
+      - "go test ./... PASS (zero regressions across all packages)"
+      - "cortexai.example.json executive persona has \"excluded_tools\": [\"get_bigquery_sample_data\"]"
+      - "cortexai.example.json executive persona has \"allowed_data_sources\": [\"bigquery\"]"
+    tdd_steps:
+      test_case:
+        given: "filterTools and checkDataSourceAllowed are fully implemented"
+        when: "go test ./internal/agent/... ./internal/handler/... -v"
+        then: "All new tests pass; all 44+ existing agent tests pass"
+      test_file: "internal/agent/bigquery_handler_test.go, internal/handler/agent_test.go"
+      test_command: "go test ./..."
+    implementation_guidelines:
+      universal: "Use table-driven tests for both helpers"
+      specific_sections:
+        - "TestFilterTools: build a synthetic []tools.Tool slice with known Names for predictable assertions"
+        - "TestCheckDataSourceAllowed: test zero-value PC, PC with matching source, PC with non-matching source"
+        - "cortexai.example.json: executive.excluded_tools=[\"get_bigquery_sample_data\"], executive.allowed_data_sources=[\"bigquery\"]"
+        - "Do not test Handle()/HandleStream() end-to-end here — filterTools unit test is sufficient"
+    verification_checklist:
+      - "[ ] TestFilterTools_NilExclusion: filterTools(tools, nil) == tools"
+      - "[ ] TestFilterTools_SingleExclusion: excluded tool absent in result"
+      - "[ ] TestFilterTools_AllExcluded: empty result slice"
+      - "[ ] TestCheckDataSourceAllowed_NilAllowed: nil AllowedDataSources → nil error"
+      - "[ ] TestCheckDataSourceAllowed_Allowed: matching source → nil error"
+      - "[ ] TestCheckDataSourceAllowed_Blocked: non-matching → error with source + available"
+      - "[ ] go test ./... PASS"
+      - "[ ] cortexai.example.json executive persona updated"
+
+execution_order:
+  - phase: "1 - Config"
+    tasks: ["TASK-01"]
+  - phase: "2 - Agent Layer"
+    tasks: ["TASK-02"]
+  - phase: "3 - Handler Layer"
+    tasks: ["TASK-03"]
+  - phase: "4 - Tests + Config"
+    tasks: ["TASK-04"]
+
+summary:
+  total_tasks: 4
+  confidence: "HIGH"
+  notes: |
+    SIMPLE brownfield change. 4 files modified, 1 new test file.
+    Backward compatible by design: nil/empty ExcludedTools = all tools;
+    nil/empty AllowedDataSources = all data sources.
+    Existing 44+ agent tests must pass without regressions.
+    No changes to routes, ES handler, LLMPool, system_prompts, or LLMRunner interface.

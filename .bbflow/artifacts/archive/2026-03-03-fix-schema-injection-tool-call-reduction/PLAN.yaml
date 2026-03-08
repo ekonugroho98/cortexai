@@ -1,0 +1,106 @@
+metadata:
+  spec_id: "fix-schema-injection-tool-call-reduction"
+  feature_name: "Fix: Schema Injection Closing Instruction (BQ + PG)"
+  mode: "BUGFIX"
+  complexity: "SIMPLE"
+  platform: "backend"
+  created_at: "2026-03-03T00:00:00+07:00"
+  spec_file: "BUG_REPORT.md"
+
+summary:
+  root_cause: "Soft 'you can skip' language in getSchemaSection/getPGSchemaSection closing instruction is treated as optional by the LLM"
+  fix_strategy: "Replace string literal with explicit IMPORTANT directive + 'at most 1 execute call' cap in both BQ and PG schema section builders"
+  total_tasks: 2
+  confidence: "HIGH"
+  notes: "String-only change — no logic, no API, no interface changes. Closing instruction is tested via package-level const extracted from the builder."
+
+risks:
+  - id: R1
+    description: "Schema cache stores the OLD wording until TTL expires (5 min)"
+    level: LOW
+    mitigation: "Call DELETE /api/v1/cache/schema/{dataset} or restart server after deploy to force refresh"
+
+tasks:
+  - id: 1
+    status: "pending"
+    status_note: ""
+    name: "Fix BQ schema section closing instruction"
+    description: >
+      Extract the BQ closing instruction as a package-level constant BQSchemaClosingInstruction
+      with the new directive wording, update sb.WriteString() to use it, and add a test asserting
+      the new wording is present and the old soft wording is absent.
+    spec_requirements: ["root-cause-bq"]
+    layer: "domain"
+    action: "modify"
+    files:
+      - "internal/agent/bigquery_handler.go"
+      - "internal/agent/bigquery_handler_test.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestBQSchemaSectionClosingInstruction_IsDirective"
+        class: "bigquery_handler_test"
+        given: "BQSchemaClosingInstruction constant exists in package agent"
+        when: "inspect BQSchemaClosingInstruction string content"
+        then: >
+          contains 'IMPORTANT: All table schemas are already provided above' and
+          contains 'DO NOT call list_tables or get_bigquery_schema' and
+          contains 'at most 1 execute call' and
+          does NOT contain 'you can skip'
+      verify_fails:
+        command: "go test ./internal/agent/ -run TestBQSchemaSectionClosingInstruction_IsDirective -v"
+        expected_failure: "undefined: BQSchemaClosingInstruction (compile error)"
+      write_implementation: >
+        1. In bigquery_handler.go, add package-level constant:
+           const BQSchemaClosingInstruction = "\nIMPORTANT: All table schemas are already provided above. DO NOT call list_tables or get_bigquery_schema — go directly to writing and executing SQL. You should need at most 1 execute call."
+        2. Replace sb.WriteString(hardcoded string) on line 130 with sb.WriteString(BQSchemaClosingInstruction).
+      verify_passes:
+        command: "go test ./internal/agent/ -run TestBQSchemaSectionClosingInstruction_IsDirective -v"
+        expected_output: "PASS"
+      commit: "fix(agent): strengthen BQ schema section closing instruction to directive language"
+
+  - id: 2
+    status: "pending"
+    status_note: ""
+    name: "Fix PG schema section closing instruction"
+    description: >
+      Same pattern as task 1 for PostgreSQL handler. Extract PGSchemaClosingInstruction constant,
+      update sb.WriteString() to use it, add test.
+    spec_requirements: ["root-cause-pg"]
+    layer: "domain"
+    action: "modify"
+    files:
+      - "internal/agent/postgres_handler.go"
+      - "internal/agent/postgres_handler_test.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestPGSchemaSectionClosingInstruction_IsDirective"
+        class: "postgres_handler_test"
+        given: "PGSchemaClosingInstruction constant exists in package agent"
+        when: "inspect PGSchemaClosingInstruction string content"
+        then: >
+          contains 'IMPORTANT: All table schemas are already provided above' and
+          contains 'DO NOT call list_postgres_tables or get_postgres_schema' and
+          contains 'at most 1 execute call' and
+          does NOT contain 'you can skip'
+      verify_fails:
+        command: "go test ./internal/agent/ -run TestPGSchemaSectionClosingInstruction_IsDirective -v"
+        expected_failure: "undefined: PGSchemaClosingInstruction (compile error)"
+      write_implementation: >
+        1. In postgres_handler.go, add package-level constant:
+           const PGSchemaClosingInstruction = "\nIMPORTANT: All table schemas are already provided above. DO NOT call list_postgres_tables or get_postgres_schema — go directly to writing and executing SQL. You should need at most 1 execute call."
+        2. Replace sb.WriteString(hardcoded string) on line 104 with sb.WriteString(PGSchemaClosingInstruction).
+      verify_passes:
+        command: "go test ./internal/agent/ -run TestPGSchemaSectionClosingInstruction_IsDirective -v"
+        expected_output: "PASS"
+      commit: "fix(agent): strengthen PG schema section closing instruction to directive language"
+
+execution_order:
+  - phase: 1
+    tasks: [1, 2]
+    note: "Both tasks are independent — can be done in any order"

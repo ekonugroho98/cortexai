@@ -1,0 +1,121 @@
+metadata:
+  feature_name: "Fix Prompt Validator SQL DML Detection"
+  spec_id: "fix-prompt-validator-sql-dml"
+  spec_file: ".bbflow/artifacts/workspace/fix-prompt-validator-sql-dml/BUG_REPORT.md"
+  mode: "BUGFIX"
+  complexity: "SIMPLE"
+  platform: "backend"
+  language: "go"
+  created_at: "2026-03-03T00:00:00+07:00"
+
+design:
+  root_cause: >
+    dangerousPatterns di prompt_validator.go tidak memiliki pattern untuk SQL DML statements.
+    Prompt "DELETE FROM orders WHERE id = 1" tidak cocok pattern apapun → lolos validasi.
+  fix_strategy: >
+    Tambahkan 7 regex patterns baru ke dangerousPatterns slice dalam grup "SQL DML statements".
+    Gunakan ^ anchor + keyword spesifik untuk menghindari false positive pada NL prompts.
+  files_modified:
+    - path: "internal/security/prompt_validator.go"
+      change: "Append 7 DML patterns to dangerousPatterns slice"
+    - path: "internal/security/security_test.go"
+      change: "Add 7 invalid test cases to TestPromptValidator"
+  files_added: []
+
+risks:
+  - id: "RISK-01"
+    description: "CREATE pattern (^\s*CREATE\s+) bisa over-block prompt seperti 'create a report'"
+    level: "LOW"
+    impact: "False positive untuk prompt NL yang dimulai dengan 'create a ...'"
+    mitigation: >
+      Anchor ^ + \s+ (spasi setelah CREATE) sudah membatasi ke format SQL statement.
+      Namun 'create a report' juga dimulai dengan 'create ' — perlu verifikasi.
+      Jika over-blocking terjadi, pattern bisa dipersempit ke ^\s*CREATE\s+(TABLE|DATABASE|INDEX|VIEW|SCHEMA)\b.
+  - id: "RISK-02"
+    description: "UPDATE pattern memerlukan \w+\s+SET\b — UPDATE dengan alias tabel bisa lolos"
+    level: "LOW"
+    impact: "UPDATE t SET ... mungkin tidak terdeteksi jika alias lebih kompleks"
+    mitigation: >
+      Pattern ^\s*UPDATE\s+\w+\s+SET\b mendeteksi format standar.
+      Edge case dengan quoted identifiers atau subquery setelah UPDATE bukan ancaman utama.
+
+tasks:
+  - id: "TASK-01"
+    name: "Add SQL DML patterns to dangerousPatterns"
+    description: >
+      Di prompt_validator.go, tambahkan grup baru "SQL DML statements" ke dangerousPatterns slice
+      dengan 7 patterns: DELETE FROM, DROP, INSERT INTO, UPDATE...SET, ALTER, TRUNCATE, CREATE.
+      Letakkan sebelum closing } dari slice (setelah prompt injection group).
+    layer: "security"
+    dependencies: []
+    spec_requirements: []
+    files:
+      - path: "internal/security/prompt_validator.go"
+        action: "MODIFY"
+        location: "dangerousPatterns slice, after prompt injection group (line ~58)"
+    output_contract: null
+    tdd_steps:
+      test_case:
+        given: "A PromptValidator and a raw SQL DML string as prompt"
+        when: "Validate() is called"
+        then: "Returns ValidationResult{Valid: false} for each DML statement type"
+      test_file: "internal/security/security_test.go"
+      test_command: "go test ./internal/security/... -v -run TestPromptValidator"
+      run_all_command: "go test ./..."
+    acceptance_criteria:
+      - "DELETE FROM ... → blocked"
+      - "DROP TABLE ... → blocked"
+      - "INSERT INTO ... → blocked"
+      - "UPDATE t SET ... → blocked"
+      - "ALTER TABLE ... → blocked"
+      - "TRUNCATE TABLE ... → blocked"
+      - "CREATE TABLE ... → blocked"
+      - "NL prompts containing 'delete/update/create' mid-sentence → still valid"
+    conventional_commit: "fix(security): block raw SQL DML statements in prompt validator"
+    estimated_effort: "10m"
+
+  - id: "TASK-02"
+    name: "Add test cases for DML pattern detection"
+    description: >
+      Di security_test.go, tambahkan 7 entries ke invalid slice dalam TestPromptValidator.
+      Satu entry per DML statement type. Juga verifikasi false-positive guard dengan
+      menambahkan NL variants ke valid slice.
+    layer: "test"
+    dependencies: ["TASK-01"]
+    spec_requirements: []
+    files:
+      - path: "internal/security/security_test.go"
+        action: "MODIFY"
+        location: "TestPromptValidator, invalid []struct slice"
+    output_contract: null
+    tdd_steps:
+      test_case:
+        given: "TestPromptValidator with extended invalid and valid slices"
+        when: "go test ./internal/security/... -run TestPromptValidator"
+        then: "All 7 DML cases blocked; NL variants still valid; exit code 0"
+      test_file: "internal/security/security_test.go"
+      test_command: "go test ./internal/security/... -v -run TestPromptValidator"
+      run_all_command: "go test ./..."
+    acceptance_criteria:
+      - "7 new invalid cases added and pass"
+      - "NL variants in valid list still pass"
+      - "go test ./... returns exit code 0"
+    conventional_commit: "test(security): add SQL DML detection test cases to TestPromptValidator"
+    estimated_effort: "10m"
+
+execution_order:
+  - phase: 1
+    description: "Add patterns to validator"
+    tasks: ["TASK-01"]
+  - phase: 2
+    description: "Add tests and verify"
+    tasks: ["TASK-02"]
+
+summary:
+  total_tasks: 2
+  total_files_modified: 2
+  estimated_effort: "20m total"
+  confidence: "HIGH"
+  notes: >
+    TASK-01 harus selesai sebelum TASK-02 agar test bisa fail-first lalu pass.
+    Verifikasi manual CREATE pattern untuk false positive setelah implementasi.

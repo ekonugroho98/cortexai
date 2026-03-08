@@ -1,0 +1,63 @@
+workflow:
+  feature_name: "Fix SQL Validator Embedded DML Detection"
+  mode: "BUGFIX"
+  complexity: "SIMPLE"
+  platform: "backend"
+  started_at: "2026-03-03T00:00:00+07:00"
+
+current:
+  phase: "spec"
+  status: "complete"
+  active_spec: "BUG_REPORT.md"
+  next_action: "Awaiting spec approval. After user confirms, run /bb-flow:plan to design implementation"
+
+phases:
+  spec:
+    status: "complete"
+    started_at: "2026-03-03T00:00:00+07:00"
+    completed_at: "2026-03-03T00:00:00+07:00"
+    artifacts_generated:
+      - "BUG_REPORT.md"
+      - "CODEBASE_MAP.md"
+    user_approved: true
+    approved_at: "2026-03-03T00:00:00+07:00"
+    revision_count: 0
+    revision_history: []
+
+  plan:
+    status: "complete"
+    started_at: "2026-03-03T00:00:00+07:00"
+    completed_at: "2026-03-03T00:00:00+07:00"
+    artifacts_generated:
+      - "PLAN.yaml"
+      - "PLAN_SUMMARY.md"
+    user_approved: true
+    approved_at: "2026-03-03T00:00:00+07:00"
+    revision_count: 0
+    revision_history: []
+
+  execute:
+    status: "complete"
+    started_at: "2026-03-03T00:00:00+07:00"
+    completed_at: "2026-03-03T00:00:00+07:00"
+    tasks_total: 2
+    tasks_completed: 2
+
+  verify:
+    status: "complete"
+    started_at: "2026-03-03T00:00:00+07:00"
+    completed_at: "2026-03-03T00:00:00+07:00"
+    result: "PASS"
+    test_results: "go test ./... — all packages pass (136 tests)"
+
+artifacts:
+  permanent:
+    - path: "BUG_REPORT.md"
+      purpose: "Bug documentation and fix specification"
+      created_at: "2026-03-03T00:00:00+07:00"
+      needed_until: "complete"
+  temporary:
+    - path: "CODEBASE_MAP.md"
+      purpose: "Affected file mapping for implementation"
+      created_at: "2026-03-03T00:00:00+07:00"
+      needed_until: "plan"

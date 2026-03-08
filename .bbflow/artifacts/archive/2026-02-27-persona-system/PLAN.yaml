@@ -1,0 +1,443 @@
+version: "1.0"
+metadata:
+  spec_id: "persona-system"
+  feature_name: "Persona System + Per-Persona AI Model Selection"
+  mode: "BROWNFIELD"
+  complexity: "COMPLEX"
+  platform: "backend"
+  language: "go"
+  spec_file: ".bbflow/artifacts/workspace/persona-system/DELTA_SPEC.md"
+  created_at: "2026-02-27"
+
+architecture:
+  approach: >
+    Add LLMPool at startup (keyed by provider:model, deduplicated), export system prompt
+    constants, refactor schema cache to store schema-only section, add resolvePersona() in
+    AgentHandler that does O(1) map lookup, pass (runner, promptStyle) per-request to handlers.
+  reference: ".bbflow/artifacts/workspace/persona-system/ARCHITECTURE.md"
+  key_decisions:
+    - "Opsi A: keep h.agent field, Handle() accepts runner param override"
+    - "LLMPool keyed by provider:model — deduplicates shared provider+model combos"
+    - "Schema cache stores schema-only (not full prompt) to share across personas"
+    - "Fallback chain: user.Persona → default → pool.fallback → nil (503)"
+
+design:
+  reference: ".bbflow/artifacts/workspace/persona-system/DESIGN.md"
+  files_created: 2
+  files_modified: 8
+  files_total: 10
+
+risks:
+  - id: "RISK-01"
+    title: "Handle() signature change breaks callers"
+    level: "LOW"
+    impact: "Compile error if any caller misses new params"
+    mitigation: "Go compiler enforces all callers. Only handler/agent.go calls Handle() — updated in same task group."
+
+  - id: "RISK-02"
+    title: "Schema cache returns wrong prompt after refactor"
+    level: "MEDIUM"
+    impact: "System prompt missing schema section or double-prepending base prompt"
+    mitigation: "Unit test getSchemaSection() returns no base prompt prefix. Test Handle() composes correctly."
+
+  - id: "RISK-03"
+    title: "Legacy config without personas breaks startup"
+    level: "MEDIUM"
+    impact: "Server fails to start if LLMPool logic doesn't handle empty personas map"
+    mitigation: "Explicit len(cfg.Personas)==0 branch falls back to legacy llm_provider logic."
+
+  - id: "RISK-04"
+    title: "LLMPool concurrent read after write"
+    level: "LOW"
+    impact: "Race condition if pool is written after startup"
+    mitigation: "Pool is written ONLY during setupRoutes (single goroutine). All request-time access is read-only. No mutex needed."
+
+tasks:
+  - id: "TASK-01"
+    name: "Add PersonaConfig to config.go"
+    description: >
+      Add PersonaConfig struct, add Personas map[string]PersonaConfig field to Config,
+      add Persona string field to UserConfig. No env override for Personas.
+    phase: 1
+    layer: "config"
+    files:
+      - path: "internal/config/config.go"
+        action: "MODIFY"
+    spec_requirements: ["REQ-001", "REQ-002", "REQ-003"]
+    output_contract: "PersonaConfig struct, Config.Personas map[string]PersonaConfig, UserConfig.Persona string"
+    dependencies: []
+    verification_checklist:
+      - "[ ] PersonaConfig has: Provider, Model, BaseURL (omitempty), SystemPromptStyle, MaxTokens (omitempty)"
+      - "[ ] Config.Personas field added after Squads"
+      - "[ ] UserConfig.Persona field added"
+      - "[ ] No env override added for Personas"
+      - "[ ] go build ./internal/config/... passes"
+    manual_verification:
+      steps:
+        - "go build ./internal/config/..."
+        - "Verify JSON tags match cortexai.example.json structure"
+    estimated_effort: "15m"
+
+  - id: "TASK-02"
+    name: "Add Persona field to User and UserResponse"
+    description: >
+      Add Persona string field to User struct, UserResponse struct, and update ToResponse()
+      to include Persona: u.Persona in the returned UserResponse.
+    phase: 1
+    layer: "models"
+    files:
+      - path: "internal/models/user.go"
+        action: "MODIFY"
+    spec_requirements: ["REQ-014"]
+    output_contract: "User.Persona string, UserResponse.Persona string, ToResponse() includes Persona"
+    dependencies: []
+    verification_checklist:
+      - "[ ] User.Persona field added with json:\"persona,omitempty\""
+      - "[ ] UserResponse.Persona field added"
+      - "[ ] ToResponse() sets Persona: u.Persona"
+      - "[ ] go build ./internal/models/... passes"
+    manual_verification:
+      steps:
+        - "go build ./internal/models/..."
+    estimated_effort: "10m"
+
+  - id: "TASK-03"
+    name: "Pass Persona through UserEntry → User in user_store.go"
+    description: >
+      Add Persona string to UserEntry struct. In NewUserStore(), set Persona: ue.Persona
+      when building models.User. In routes.go (TASK-09) pass u.Persona to UserEntry.
+    phase: 2
+    layer: "service"
+    files:
+      - path: "internal/service/user_store.go"
+        action: "MODIFY"
+    spec_requirements: ["REQ-003"]
+    output_contract: "UserEntry.Persona string, NewUserStore sets User.Persona from entry"
+    dependencies: ["TASK-02"]
+    verification_checklist:
+      - "[ ] UserEntry.Persona field added"
+      - "[ ] NewUserStore() sets u.Persona = ue.Persona"
+      - "[ ] go build ./internal/service/... passes"
+    tdd_steps:
+      test_case:
+        given: "UserEntry with Persona: 'executive'"
+        when: "NewUserStore() builds User from entry"
+        then: "returned User.Persona == 'executive'"
+      test_file: "internal/service/user_store_test.go"
+      test_command: "go test ./internal/service/ -run TestUserStorePersona -v"
+    estimated_effort: "15m"
+
+  - id: "TASK-04"
+    name: "Create LLMPool (agent/llm_pool.go)"
+    description: >
+      Create new file internal/agent/llm_pool.go with LLMPool struct.
+      Methods: NewLLMPool(), Register(key, runner), SetFallback(runner),
+      Get(key) LLMRunner, HasRunners() bool. PoolKey(provider, model) helper.
+      LLMPool is read-only after startup — no mutex needed.
+    phase: 1
+    layer: "agent"
+    files:
+      - path: "internal/agent/llm_pool.go"
+        action: "CREATE"
+    spec_requirements: ["REQ-005", "REQ-006"]
+    output_contract: "LLMPool struct, PoolKey(provider, model) string, Get() LLMRunner, HasRunners() bool"
+    dependencies: []
+    verification_checklist:
+      - "[ ] PoolKey format is 'provider:model'"
+      - "[ ] Get() returns fallback when key not found"
+      - "[ ] Get() returns nil when key not found AND no fallback"
+      - "[ ] HasRunners() true when len(runners)>0 OR fallback!=nil"
+      - "[ ] go build ./internal/agent/... passes"
+    tdd_steps:
+      test_case:
+        given: "LLMPool with runner registered at key 'anthropic:claude-sonnet-4-6' and a fallback runner"
+        when: "Get('anthropic:claude-sonnet-4-6') and Get('unknown:key')"
+        then: "Get known key returns registered runner; Get unknown key returns fallback"
+      test_file: "internal/agent/llm_pool_test.go"
+      test_command: "go test ./internal/agent/ -run TestLLMPool -v"
+    estimated_effort: "20m"
+
+  - id: "TASK-05"
+    name: "Refactor bigquery_handler.go — export constant + schema cache + Handle() params"
+    description: >
+      Three changes in bigquery_handler.go:
+      1. Export: rename baseSystemPrompt → BaseSystemPrompt (package-level const)
+      2. Cache refactor: replace buildSystemPrompt() with getSchemaSection() that caches
+         ONLY the schema portion (no base prompt). Update schemaCache.set/get accordingly.
+      3. Signature change: Handle() and HandleStream() add (runner LLMRunner, promptStyle string) params.
+         In body: use runner.Run() instead of h.agent.Run(), compose systemPrompt from
+         SystemPromptStyle(promptStyle) + getSchemaSection(ctx, datasetID).
+    phase: 2
+    layer: "agent"
+    files:
+      - path: "internal/agent/bigquery_handler.go"
+        action: "MODIFY"
+    spec_requirements: ["REQ-010", "REQ-012"]
+    output_contract: >
+      BaseSystemPrompt exported const, getSchemaSection(ctx, datasetID) string returns schema-only,
+      Handle(ctx, req, apiKey, datasets, runner, promptStyle) signature
+    dependencies: ["TASK-04"]
+    verification_checklist:
+      - "[ ] baseSystemPrompt renamed to BaseSystemPrompt"
+      - "[ ] getSchemaSection() does NOT prepend BaseSystemPrompt"
+      - "[ ] getSchemaSection() caches with key=datasetID (same cache object)"
+      - "[ ] Handle() uses runner.Run() not h.agent.Run()"
+      - "[ ] Handle() composes SystemPromptStyle(promptStyle) + getSchemaSection()"
+      - "[ ] HandleStream() same changes"
+      - "[ ] h.agent field REMAINS in struct (Opsi A)"
+      - "[ ] go build ./internal/agent/... passes"
+    tdd_steps:
+      test_case:
+        given: "getSchemaSection() called with a dataset that has tables"
+        when: "the returned schema section is inspected"
+        then: "string starts with '\\n\\n## Available Dataset:' and does NOT contain 'You are CortexAI'"
+      test_file: "internal/agent/bigquery_handler_test.go"
+      test_command: "go test ./internal/agent/ -run TestGetSchemaSection -v"
+    estimated_effort: "45m"
+
+  - id: "TASK-06"
+    name: "Refactor elasticsearch_handler.go — export constant + Handle() params"
+    description: >
+      Two changes in elasticsearch_handler.go:
+      1. Export: rename esSystemPrompt → ESSystemPrompt
+      2. Signature change: Handle() and HandleStream() add (runner LLMRunner, promptStyle string).
+         In body: use runner.Run() instead of h.agent.Run(), use ESSystemPromptStyle(promptStyle).
+    phase: 2
+    layer: "agent"
+    files:
+      - path: "internal/agent/elasticsearch_handler.go"
+        action: "MODIFY"
+    spec_requirements: ["REQ-011"]
+    output_contract: "ESSystemPrompt exported const, Handle(ctx, req, apiKey, patterns, runner, promptStyle) signature"
+    dependencies: ["TASK-04"]
+    verification_checklist:
+      - "[ ] esSystemPrompt renamed to ESSystemPrompt"
+      - "[ ] Handle() uses runner.Run() not h.agent.Run()"
+      - "[ ] Handle() uses ESSystemPromptStyle(promptStyle)"
+      - "[ ] HandleStream() same changes"
+      - "[ ] h.agent field REMAINS in struct (Opsi A)"
+      - "[ ] go build ./internal/agent/... passes"
+    manual_verification:
+      steps:
+        - "go build ./internal/agent/..."
+    estimated_effort: "20m"
+
+  - id: "TASK-07"
+    name: "Create system_prompts.go — per-persona prompt constants"
+    description: >
+      Create internal/agent/system_prompts.go with:
+      - Constants: executiveSystemPrompt, technicalSystemPrompt, supportSystemPrompt
+        (BQ variants), esExecutiveSystemPrompt, esSupportSystemPrompt (ES variants)
+      - Functions: SystemPromptStyle(style string) string — dispatches to constant or BaseSystemPrompt
+      - ESSystemPromptStyle(style string) string — dispatches to ES constant or ESSystemPrompt
+      Prompt content from docs/PERSONA_IMPLEMENTATION.md.
+    phase: 3
+    layer: "agent"
+    files:
+      - path: "internal/agent/system_prompts.go"
+        action: "CREATE"
+    spec_requirements: ["REQ-007", "REQ-008", "REQ-009"]
+    output_contract: "SystemPromptStyle(style string) string, ESSystemPromptStyle(style string) string"
+    dependencies: ["TASK-05", "TASK-06"]
+    verification_checklist:
+      - "[ ] SystemPromptStyle('executive') returns executiveSystemPrompt (contains 'C-level')"
+      - "[ ] SystemPromptStyle('technical') returns technicalSystemPrompt (contains 'developers')"
+      - "[ ] SystemPromptStyle('support') returns supportSystemPrompt (contains 'root cause')"
+      - "[ ] SystemPromptStyle('') returns BaseSystemPrompt"
+      - "[ ] SystemPromptStyle('unknown') returns BaseSystemPrompt"
+      - "[ ] ESSystemPromptStyle dispatch works same way"
+      - "[ ] go build ./internal/agent/... passes"
+    tdd_steps:
+      test_case:
+        given: "SystemPromptStyle called with each valid style and with unknown/empty style"
+        when: "return value is inspected"
+        then: "executive → contains 'C-level executives'; technical → contains 'developers and data engineers'; support → contains 'root cause'; empty/unknown → same as BaseSystemPrompt"
+      test_file: "internal/agent/system_prompts_test.go"
+      test_command: "go test ./internal/agent/ -run TestSystemPromptStyle -v"
+    estimated_effort: "25m"
+
+  - id: "TASK-08"
+    name: "Update handler/agent.go — resolvePersona + pass runner/promptStyle"
+    description: >
+      1. Add llmPool *agent.LLMPool and personas map[string]config.PersonaConfig to AgentHandler struct
+      2. Update NewAgentHandler() constructor to accept llmPool + personas
+      3. Add resolvePersona(user *models.User) (agent.LLMRunner, string) method
+      4. In QueryAgent(): call resolvePersona, pass runner+promptStyle to bqHandler.Handle() and esHandler.Handle()
+      5. In QueryAgent(): after handler returns, set resp.AgentMetadata["persona"] = personaName
+      6. Same changes in QueryAgentStream()
+      7. Add import for config package
+    phase: 4
+    layer: "handler"
+    files:
+      - path: "internal/handler/agent.go"
+        action: "MODIFY"
+    spec_requirements: ["REQ-004", "REQ-013"]
+    output_contract: "NewAgentHandler(bqHandler, esHandler, router, llmPool, personas), resolvePersona() (LLMRunner, string)"
+    dependencies: ["TASK-02", "TASK-04", "TASK-07"]
+    verification_checklist:
+      - "[ ] AgentHandler.llmPool field added"
+      - "[ ] AgentHandler.personas field added"
+      - "[ ] NewAgentHandler() accepts llmPool + personas"
+      - "[ ] resolvePersona() follows fallback chain: user.Persona → default → pool.Get('')"
+      - "[ ] QueryAgent() calls resolvePersona() before routing"
+      - "[ ] QueryAgent() passes runner+promptStyle to bqHandler.Handle() and esHandler.Handle()"
+      - "[ ] resp.AgentMetadata['persona'] set after handler returns"
+      - "[ ] QueryAgentStream() same changes"
+      - "[ ] 503 returned if runner == nil"
+      - "[ ] go build ./internal/handler/... passes"
+    tdd_steps:
+      test_case:
+        given: "AgentHandler with LLMPool containing runner for 'anthropic:claude-sonnet-4-6', personas map with 'executive' → {provider:anthropic, model:claude-sonnet-4-6}, and a User with Persona='executive'"
+        when: "resolvePersona(user) is called"
+        then: "returns the registered runner and promptStyle='executive'"
+      test_file: "internal/handler/agent_test.go"
+      test_command: "go test ./internal/handler/ -run TestResolvePersona -v"
+    estimated_effort: "45m"
+
+  - id: "TASK-09"
+    name: "Update server/routes.go — build LLMPool + wire everything"
+    description: >
+      1. Remove existing var llmRunner + switch cfg.LLMProvider block
+      2. Replace with llmPool := agent.NewLLMPool() + loop over cfg.Personas to Register runners
+      3. Add deduplication: skip if PoolKey already registered
+      4. Legacy fallback: if len(cfg.Personas)==0 → use cfg.LLMProvider to create fallback runner
+      5. Set default persona's runner as pool.SetFallback()
+      6. Update if llmRunner != nil → if llmPool.HasRunners()
+      7. Update agentH constructor: handler.NewAgentHandler(bqAgentH, esAgentH, router, llmPool, cfg.Personas)
+      8. Update BigQueryHandler + ElasticsearchHandler constructors: pass llmPool.Get("") as default runner
+      9. Update UserEntry loop to pass u.Persona
+      10. Add startup log for each registered persona
+    phase: 4
+    layer: "server"
+    files:
+      - path: "internal/server/routes.go"
+        action: "MODIFY"
+    spec_requirements: ["REQ-001", "REQ-004", "REQ-005", "REQ-006", "REQ-016"]
+    output_contract: null
+    dependencies: ["TASK-08", "TASK-01"]
+    verification_checklist:
+      - "[ ] Old llmRunner var removed"
+      - "[ ] LLMPool built from cfg.Personas with dedup"
+      - "[ ] len(cfg.Personas)==0 fallback creates runner from legacy cfg.LLMProvider"
+      - "[ ] cfg.Personas['default'] runner set as pool.SetFallback()"
+      - "[ ] agentH created with llmPool + cfg.Personas"
+      - "[ ] UserEntry loop includes Persona: u.Persona"
+      - "[ ] Startup log emitted per registered persona"
+      - "[ ] go build ./... passes"
+      - "[ ] go test ./... passes (no regressions)"
+    manual_verification:
+      steps:
+        - "go build ./..."
+        - "go test ./..."
+        - "Run server with no personas in config → verify startup succeeds"
+        - "Run server with personas → verify startup log shows registered runners"
+    estimated_effort: "60m"
+
+  - id: "TASK-10"
+    name: "Update cortexai.example.json — add personas section"
+    description: >
+      Add personas object with 4 examples: default, executive, app_support, developer.
+      Update users array with persona field for each user entry.
+      Content from docs/PERSONA_IMPLEMENTATION.md Section 11.
+    phase: 5
+    layer: "config"
+    files:
+      - path: "config/cortexai.example.json"
+        action: "MODIFY"
+    spec_requirements: ["REQ-001"]
+    output_contract: null
+    dependencies: ["TASK-01"]
+    verification_checklist:
+      - "[ ] personas object added with default, executive, app_support, developer"
+      - "[ ] Each persona has provider, model, system_prompt_style, max_tokens"
+      - "[ ] app_support has base_url field"
+      - "[ ] users array has persona field for each entry"
+      - "[ ] JSON is valid (parse with: cat config/cortexai.example.json | python3 -m json.tool)"
+    manual_verification:
+      steps:
+        - "cat config/cortexai.example.json | python3 -m json.tool"
+    estimated_effort: "10m"
+
+  - id: "TASK-11"
+    name: "Write unit tests — LLMPool + SystemPromptStyle"
+    description: >
+      Write unit tests for the two new files:
+      1. internal/agent/llm_pool_test.go:
+         - TestLLMPoolGet_RegisteredKey
+         - TestLLMPoolGet_FallbackWhenNotFound
+         - TestLLMPoolGet_NilWhenNoFallback
+         - TestLLMPoolDedup (two personas same model = 1 runner)
+         - TestLLMPoolHasRunners
+         - TestPoolKey_Format
+      2. internal/agent/system_prompts_test.go:
+         - TestSystemPromptStyle_Executive
+         - TestSystemPromptStyle_Technical
+         - TestSystemPromptStyle_Support
+         - TestSystemPromptStyle_DefaultFallback (empty + unknown style)
+         - TestESSystemPromptStyle_Executive
+         - TestESSystemPromptStyle_Support
+         - TestESSystemPromptStyle_DefaultFallback
+    phase: 5
+    layer: "test"
+    files:
+      - path: "internal/agent/llm_pool_test.go"
+        action: "CREATE"
+      - path: "internal/agent/system_prompts_test.go"
+        action: "CREATE"
+    spec_requirements: ["REQ-005", "REQ-006", "REQ-007", "REQ-008", "REQ-009"]
+    output_contract: null
+    dependencies: ["TASK-04", "TASK-07"]
+    verification_checklist:
+      - "[ ] All TestLLMPool* tests pass"
+      - "[ ] All TestSystemPromptStyle* tests pass"
+      - "[ ] go test ./internal/agent/ -v passes"
+    tdd_steps:
+      test_case:
+        given: "LLMPool with no runners registered and no fallback"
+        when: "Get('any:key') is called"
+        then: "returns nil"
+      test_file: "internal/agent/llm_pool_test.go"
+      test_command: "go test ./internal/agent/ -v"
+    estimated_effort: "30m"
+
+execution_order:
+  - phase: 1
+    name: "Data model foundation"
+    parallel: true
+    tasks: ["TASK-01", "TASK-02", "TASK-04"]
+    note: "All independent — can be done in parallel"
+
+  - phase: 2
+    name: "Agent layer changes"
+    parallel: true
+    tasks: ["TASK-03", "TASK-05", "TASK-06"]
+    note: "TASK-03 after TASK-02. TASK-05, TASK-06 after TASK-04 (conceptually). Can be done in parallel."
+
+  - phase: 3
+    name: "System prompts"
+    parallel: false
+    tasks: ["TASK-07"]
+    note: "Requires TASK-05 (BaseSystemPrompt exported) and TASK-06 (ESSystemPrompt exported)"
+
+  - phase: 4
+    name: "Handler and wiring"
+    parallel: true
+    tasks: ["TASK-08", "TASK-09"]
+    note: "TASK-08 can start when TASK-07 done. TASK-09 requires TASK-08 complete first (sequential within phase 4)."
+
+  - phase: 5
+    name: "Config + Tests"
+    parallel: true
+    tasks: ["TASK-10", "TASK-11"]
+    note: "TASK-10 any time after TASK-01. TASK-11 after TASK-04 and TASK-07."
+
+summary:
+  total_tasks: 11
+  files_created: 4
+  files_modified: 7
+  estimated_total_effort: "~4.5 hours"
+  confidence: "HIGH"
+  notes: >
+    All changes are backward compatible. Go compiler enforces Handle() callers at compile time.
+    Biggest risk is schema cache refactor (TASK-05) — mitigated by unit test.
+    Run go build ./... after each task to catch errors early.

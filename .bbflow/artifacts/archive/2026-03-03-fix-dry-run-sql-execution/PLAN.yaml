@@ -1,0 +1,167 @@
+metadata:
+  feature_name: "Fix dry_run SQL Execution During Agent Loop"
+  spec_id: "fix-dry-run-sql-execution"
+  spec_file: ".bbflow/artifacts/workspace/fix-dry-run-sql-execution/BUG_REPORT.md"
+  mode: "BUGFIX"
+  complexity: "SIMPLE"
+  platform: "backend"
+  language: "go"
+  created_at: "2026-03-03T00:00:00+07:00"
+
+design:
+  root_cause: >
+    filterTools() dipanggil dengan excludedTools dari persona config,
+    tapi saat req.DryRun==true tidak ada yang menambahkan execute tool ke excludedTools.
+    Post-loop guard (if !req.DryRun) terlambat — SQL sudah dieksekusi di dalam agent loop.
+  fix_strategy: >
+    Di setiap Handle() dan HandleStream() pada BigQueryHandler dan PostgresHandler,
+    sebelum memanggil filterTools(), check req.DryRun. Jika true, append nama
+    execute tool ke excludedTools. Menggunakan mekanisme excludedTools yang sudah ada.
+  files_modified:
+    - path: "internal/agent/bigquery_handler.go"
+      change: "Add DryRun check before filterTools() in Handle() and HandleStream()"
+    - path: "internal/agent/postgres_handler.go"
+      change: "Add DryRun check before filterTools() in Handle() and HandleStream()"
+  files_added: []
+
+risks:
+  - id: "RISK-01"
+    description: "lastExecutedSQL bisa kosong jika LLM tidak pernah memanggil execute tool"
+    level: "LOW"
+    impact: "generated_sql field dalam response bisa kosong saat dry_run=true"
+    mitigation: >
+      lastExecutedSQL diisi dari tool call params (tidak dari execution result),
+      jadi tetap terisi selama LLM mencantumkan SQL dalam tool call params.
+      Fallback kedua: SQL dari text response (extractSQL). Behavior ini sudah ada sebelum fix.
+  - id: "RISK-02"
+    description: "Persona config yang sudah exclude execute tool secara manual + dry_run=true"
+    level: "LOW"
+    impact: "append() akan membuat excludedTools berisi duplicate entry"
+    mitigation: >
+      filterTools() menggunakan map lookup — duplicate entry di excludedTools aman,
+      tidak menyebabkan error atau duplicate removal. append() juga tidak mutate input slice.
+
+tasks:
+  - id: "TASK-01"
+    name: "Fix BigQuery handler — exclude execute tool when dry_run=true"
+    description: >
+      Di bigquery_handler.go, tambahkan pengecekan req.DryRun sebelum filterTools()
+      di dua tempat: Handle() (line ~241) dan HandleStream() (line ~409).
+      Jika req.DryRun true, append "execute_bigquery_sql" ke excludedTools.
+    layer: "agent"
+    dependencies: []
+    spec_requirements: []  # BUGFIX mode — no REQ-IDs
+    files:
+      - path: "internal/agent/bigquery_handler.go"
+        action: "MODIFY"
+        locations:
+          - method: "Handle()"
+            before_line: 242
+            insert: |
+              if req.DryRun {
+                excludedTools = append(excludedTools, "execute_bigquery_sql")
+              }
+          - method: "HandleStream()"
+            before_line: 410
+            insert: |
+              if req.DryRun {
+                excludedTools = append(excludedTools, "execute_bigquery_sql")
+              }
+    output_contract: null
+    tdd_steps: null
+    manual_verification:
+      - "Build passes: go build ./..."
+      - "Send request dengan dry_run:true ke /api/v1/query-agent — agent tidak memanggil execute_bigquery_sql"
+      - "Send request dengan dry_run:false (default) — behavior identik dengan sebelum fix"
+    acceptance_criteria:
+      - "execute_bigquery_sql tidak muncul di tools list saat dry_run=true"
+      - "Schema/inspection tools masih tersedia saat dry_run=true"
+      - "dry_run=false tidak terpengaruh"
+    conventional_commit: "fix(agent): exclude execute_bigquery_sql from tools when dry_run=true"
+    estimated_effort: "15m"
+
+  - id: "TASK-02"
+    name: "Fix PostgreSQL handler — exclude execute tool when dry_run=true"
+    description: >
+      Di postgres_handler.go, tambahkan pengecekan req.DryRun sebelum filterTools()
+      di dua tempat: Handle() (line ~187) dan HandleStream() (line ~369).
+      Jika req.DryRun true, append "execute_postgres_sql" ke excludedTools.
+    layer: "agent"
+    dependencies: []
+    spec_requirements: []
+    files:
+      - path: "internal/agent/postgres_handler.go"
+        action: "MODIFY"
+        locations:
+          - method: "Handle()"
+            before_line: 188
+            insert: |
+              if req.DryRun {
+                excludedTools = append(excludedTools, "execute_postgres_sql")
+              }
+          - method: "HandleStream()"
+            before_line: 370
+            insert: |
+              if req.DryRun {
+                excludedTools = append(excludedTools, "execute_postgres_sql")
+              }
+    output_contract: null
+    tdd_steps: null
+    manual_verification:
+      - "Build passes: go build ./..."
+      - "Send request dengan dry_run:true ke PG endpoint — agent tidak memanggil execute_postgres_sql"
+      - "dry_run=false behavior tidak berubah"
+    acceptance_criteria:
+      - "execute_postgres_sql tidak muncul di tools list saat dry_run=true"
+      - "Schema/inspection tools masih tersedia saat dry_run=true"
+      - "dry_run=false tidak terpengaruh"
+    conventional_commit: "fix(agent): exclude execute_postgres_sql from tools when dry_run=true"
+    estimated_effort: "15m"
+
+  - id: "TASK-03"
+    name: "Add unit tests for dry_run tool exclusion behavior"
+    description: >
+      Tambahkan unit tests di bigquery_handler_test.go untuk mendokumentasikan
+      dan memverifikasi bahwa filterTools() dengan "execute_bigquery_sql" bekerja
+      sesuai expected behavior dry_run. Juga verifikasi bahwa fix tidak breaking
+      existing tests dengan menjalankan go test ./internal/agent/...
+    layer: "test"
+    dependencies: ["TASK-01", "TASK-02"]
+    spec_requirements: []
+    files:
+      - path: "internal/agent/bigquery_handler_test.go"
+        action: "MODIFY"
+        description: "Add TestFilterTools_DryRunPattern test"
+    output_contract: null
+    tdd_steps:
+      test_case:
+        given: "A tool list containing execute_bigquery_sql and inspection tools"
+        when: "filterTools() is called with excludedTools containing 'execute_bigquery_sql'"
+        then: "execute_bigquery_sql is absent from result; inspection tools remain present"
+      test_file: "internal/agent/bigquery_handler_test.go"
+      test_command: "go test ./internal/agent/... -v -run TestFilterTools_DryRunPattern"
+      run_all_command: "go test ./..."
+    acceptance_criteria:
+      - "New test TestFilterTools_DryRunPattern passes"
+      - "All 136+ existing tests still pass"
+      - "go test ./... returns exit code 0"
+    conventional_commit: "test(agent): add TestFilterTools_DryRunPattern for dry_run exclusion"
+    estimated_effort: "15m"
+
+execution_order:
+  - phase: 1
+    description: "Apply fixes (parallel)"
+    tasks: ["TASK-01", "TASK-02"]
+  - phase: 2
+    description: "Add tests and verify"
+    tasks: ["TASK-03"]
+
+summary:
+  total_tasks: 3
+  total_files_modified: 3
+  estimated_effort: "45m total"
+  confidence: "HIGH"
+  notes: >
+    Fix sangat terlokalisasi (1 baris kondisional + 1 append per lokasi × 4 lokasi).
+    Menggunakan mekanisme filterTools yang sudah ada dan teruji.
+    TASK-01 dan TASK-02 independen dan bisa dikerjakan paralel.

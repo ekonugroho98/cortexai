@@ -1,0 +1,88 @@
+workflow:
+  feature_name: "Fix dry_run SQL Execution During Agent Loop"
+  mode: "BUGFIX"
+  complexity: "SIMPLE"
+  platform: "backend"
+  started_at: "2026-03-03T00:00:00+07:00"
+
+current:
+  phase: "verify"
+  status: "complete"
+  active_spec: "BUG_REPORT.md"
+  next_action: "Run /bb-flow:complete to archive and finalize"
+
+phases:
+  spec:
+    status: "complete"
+    started_at: "2026-03-03T00:00:00+07:00"
+    completed_at: "2026-03-03T00:00:00+07:00"
+    artifacts_generated:
+      - "BUG_REPORT.md"
+      - "CODEBASE_MAP.md"
+    user_approved: true
+    approved_at: "2026-03-03T00:00:00+07:00"
+    revision_count: 0
+    revision_history: []
+
+  plan:
+    status: "complete"
+    started_at: "2026-03-03T00:00:00+07:00"
+    completed_at: "2026-03-03T00:00:00+07:00"
+    artifacts_generated: ["PLAN.yaml", "PLAN_SUMMARY.md"]
+    user_approved: true
+    approved_at: "2026-03-03T00:00:00+07:00"
+    revision_count: 0
+    revision_history: []
+
+  execute:
+    status: "complete"
+    started_at: "2026-03-03T00:00:00+07:00"
+    completed_at: "2026-03-03T00:00:00+07:00"
+    tasks_total: 3
+    tasks_completed: 3
+    tasks:
+      - id: "TASK-01"
+        name: "Fix BigQuery handler — exclude execute tool when dry_run=true"
+        status: "complete"
+        files_changed:
+          - "internal/agent/bigquery_handler.go"
+      - id: "TASK-02"
+        name: "Fix PostgreSQL handler — exclude execute tool when dry_run=true"
+        status: "complete"
+        files_changed:
+          - "internal/agent/postgres_handler.go"
+      - id: "TASK-03"
+        name: "Add unit tests for dry_run tool exclusion behavior"
+        status: "complete"
+        files_changed:
+          - "internal/agent/bigquery_handler_test.go"
+
+  verify:
+    status: "complete"
+    started_at: "2026-03-03T00:00:00+07:00"
+    completed_at: "2026-03-03T00:00:00+07:00"
+    result: "PASS"
+    test_command: "go test ./..."
+    test_summary: "All packages pass — internal/agent (incl. new TestFilterTools_DryRunPattern), internal/handler, internal/middleware, internal/security, internal/service, internal/tools"
+    consecutive_failures: 0
+
+artifacts:
+  permanent:
+    - path: "BUG_REPORT.md"
+      purpose: "Bug documentation and fix specification"
+      created_at: "2026-03-03T00:00:00+07:00"
+      needed_until: "complete"
+    - path: "PLAN.yaml"
+      purpose: "Implementation plan"
+      created_at: "2026-03-03T00:00:00+07:00"
+      needed_until: "complete"
+    - path: "PLAN_SUMMARY.md"
+      purpose: "Human-readable plan summary"
+      created_at: "2026-03-03T00:00:00+07:00"
+      needed_until: "complete"
+  temporary:
+    - path: "CODEBASE_MAP.md"
+      purpose: "Affected file mapping for planning"
+      created_at: "2026-03-03T00:00:00+07:00"
+      needed_until: "plan"
+      cleanup_eligible: true

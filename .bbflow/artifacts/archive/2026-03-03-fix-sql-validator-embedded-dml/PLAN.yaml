@@ -1,0 +1,117 @@
+metadata:
+  spec_id: "fix-sql-validator-embedded-dml"
+  feature_name: "Fix SQL Validator Embedded DML Detection"
+  mode: "BUGFIX"
+  complexity: "SIMPLE"
+  platform: "backend"
+  spec_file: "BUG_REPORT.md"
+  created_at: "2026-03-03T00:00:00+07:00"
+
+approach: |
+  Root Cause: sqlDangerousPatterns only matches DML after `;` (chained injection).
+  DML embedded in WITH...AS(DML) or subqueries passes because there is no `;` before DELETE/INSERT/UPDATE.
+  Fix: Add 3 word-boundary patterns (\b) to sqlDangerousPatterns — no semicolon anchor — so they match
+  DML anywhere in the query string. Semicolon-prefixed patterns are preserved (still needed for chained injection).
+
+risks:
+  - description: "Pattern \\bDELETE\\s+FROM\\b could false-positive on column aliases like 'delete_from_date'"
+    level: "LOW"
+    mitigation: "\\b requires word boundary — 'delete_from_date' won't match because '_' is a word char; test confirms"
+  - description: "Pattern \\bUPDATE\\s+\\w+\\s+SET\\b might miss multi-word table names (e.g. UPDATE schema.table SET)"
+    level: "LOW"
+    mitigation: "\\w+ matches single word only; quoted/schema-qualified UPDATE is extremely rare in CTE context"
+
+tasks:
+  - id: 1
+    status: "pending"
+    status_note: ""
+    name: "Add failing tests for embedded DML detection"
+    description: |
+      Add 3 invalid test cases (embedded DELETE/INSERT/UPDATE in CTE or subquery) and 2 valid guard
+      cases (CTE with SELECT, UNION ALL SELECT) to TestSQLValidator in security_test.go.
+      These must FAIL before the patterns are added.
+    spec_requirements: ["Acceptance Criteria"]
+    layer: "test"
+    action: "modify"
+    files:
+      - "internal/security/security_test.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestSQLValidator_EmbeddedDML"
+        class: "security_test"
+        given: "A SQLValidator and SQL strings with DML embedded inside CTE or subquery"
+        when: "v.Validate(sql) is called for each embedded DML string"
+        then: "Returns non-empty error string for all 3 embedded DML cases; returns empty string for valid CTE-SELECT and UNION ALL SELECT"
+      verify_fails:
+        command: "go test ./internal/security/... -run TestSQLValidator -v"
+        expected_failure: "dangerous SQL not rejected"
+      write_implementation: |
+        In TestSQLValidator in security_test.go:
+        - Add to invalid []string slice (3 new entries):
+            "WITH x AS (DELETE FROM orders RETURNING id) SELECT * FROM x",
+            "SELECT * FROM t WHERE id IN (INSERT INTO evil SELECT 1 RETURNING id)",
+            "SELECT a, (UPDATE orders SET status='x' WHERE id=1 RETURNING id) FROM t",
+        - Add to valid []string slice (2 guard entries, confirming no false positive):
+            "WITH cte AS (SELECT id FROM orders) SELECT * FROM cte",
+            "SELECT * FROM a UNION ALL SELECT * FROM b",
+        These are purely test data additions — no production code changes yet.
+      verify_passes:
+        command: "go test ./internal/security/... -run TestSQLValidator -v"
+        expected_output: "FAIL (3 embedded DML cases not yet blocked)"
+      commit: "test(security): add failing tests for embedded DML detection in CTE/subquery"
+
+  - id: 2
+    status: "pending"
+    status_note: ""
+    name: "Add word-boundary DML patterns to sqlDangerousPatterns"
+    description: |
+      Add 3 new regexp entries to sqlDangerousPatterns in sql_validator.go using \b word boundary
+      (not ^ or ; anchor). Place them after the existing semicolon-prefixed DML group (line 16),
+      before the EXEC/EXECUTE entries. Do NOT remove any existing patterns.
+    spec_requirements: ["Acceptance Criteria"]
+    layer: "data"
+    action: "modify"
+    files:
+      - "internal/security/sql_validator.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestSQLValidator_EmbeddedDML"
+        class: "security_test"
+        given: "sqlDangerousPatterns contains 3 new \\b-anchored patterns"
+        when: "v.Validate() is called on embedded DML strings from Task 1 tests"
+        then: "All 3 embedded DML strings return non-empty error; all valid strings return empty string"
+      verify_fails:
+        command: "go test ./internal/security/... -run TestSQLValidator -v"
+        expected_failure: "Tests currently fail (from Task 1)"
+      write_implementation: |
+        In internal/security/sql_validator.go, append after the `(?i);\s*TRUNCATE\s+` line (line 16)
+        and before the `(?i);\s*EXEC\s*\(?` line (line 17), add:
+          // DML embedded in subquery/CTE (no semicolon prefix needed)
+          regexp.MustCompile(`(?i)\bDELETE\s+FROM\b`),
+          regexp.MustCompile(`(?i)\bINSERT\s+INTO\b`),
+          regexp.MustCompile(`(?i)\bUPDATE\s+\w+\s+SET\b`),
+        Keep all existing patterns unchanged.
+      verify_passes:
+        command: "go test ./internal/security/... -v"
+        expected_output: "ok  \tgithub.com/cortexai/cortexai/internal/security"
+      commit: "fix(security): block DML embedded in CTE/subquery via word-boundary patterns"
+
+execution_order:
+  - phase: "Fix"
+    tasks: [1, 2]
+    notes: "Task 1 first (write failing tests), then Task 2 (implement patterns to make them pass). Sequential — Task 2 depends on Task 1."
+
+summary:
+  total_tasks: 2
+  files_modified: 2
+  confidence: "HIGH"
+  notes: |
+    Additive-only change — no existing patterns removed or modified.
+    \b word boundary prevents false positives on column names containing 'delete', 'insert', 'update'.
+    Full test suite must pass after Task 2: go test ./...

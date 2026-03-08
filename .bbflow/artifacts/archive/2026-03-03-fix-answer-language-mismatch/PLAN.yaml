@@ -1,0 +1,220 @@
+metadata:
+  spec_id: "fix-answer-language-mismatch"
+  feature_name: "Fix Answer Language Mismatch"
+  mode: "BROWNFIELD"
+  complexity: "SIMPLE"
+  platform: "backend"
+  spec_file: "DELTA_SPEC.md"
+  created_at: "2026-03-03T00:00:00+07:00"
+
+approach: |
+  Root Cause: BQ and PG system prompts have no language-matching rule; ES prompts
+  have an inconsistent partial rule. Fix: add explicit language rule to all 11 prompts
+  across 3 files. TDD: write a single table-driven test that checks all 11 prompts
+  for the presence of the language rule string, then implement file by file.
+
+risks:
+  - description: "ES prompt restructuring (renumbering rules #4→#5, #5→#6, #6→#7) could lose existing rule text"
+    level: "LOW"
+    mitigation: "Test checks presence of rule text, not numbering. Careful edit with exact old/new strings."
+
+tasks:
+  - id: 1
+    status: "pending"
+    status_note: ""
+    name: "Write failing test for language rule presence in all prompts"
+    description: |
+      Add TestAllPromptsContainLanguageRule to system_prompts_test.go. The test iterates
+      over all 11 prompt constants and asserts each contains the substring
+      "respond in the same language". This will fail for all prompts before implementation.
+    spec_requirements: ["Acceptance Criteria"]
+    layer: "test"
+    action: "modify"
+    files:
+      - "internal/agent/system_prompts_test.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestAllPromptsContainLanguageRule"
+        class: "agent_test (package agent)"
+        given: "All 11 system prompt constants as defined in system_prompts.go, bigquery_handler.go, elasticsearch_handler.go"
+        when: "strings.Contains(prompt, \"respond in the same language\") is called for each"
+        then: "Returns true for all 11 prompts — fails for all before implementation"
+      verify_fails:
+        command: "go test ./internal/agent/... -run TestAllPromptsContainLanguageRule -v"
+        expected_failure: "FAIL: prompt missing language rule"
+      write_implementation: |
+        In internal/agent/system_prompts_test.go, add after the last test function:
+          func TestAllPromptsContainLanguageRule(t *testing.T) {
+              prompts := map[string]string{
+                  "BaseSystemPrompt":        BaseSystemPrompt,
+                  "executiveSystemPrompt":   SystemPromptStyle("executive"),
+                  "technicalSystemPrompt":   SystemPromptStyle("technical"),
+                  "supportSystemPrompt":     SystemPromptStyle("support"),
+                  "PGBaseSystemPrompt":      PGBaseSystemPrompt,
+                  "pgExecutiveSystemPrompt": PGSystemPromptStyle("executive"),
+                  "pgTechnicalSystemPrompt": PGSystemPromptStyle("technical"),
+                  "pgSupportSystemPrompt":   PGSystemPromptStyle("support"),
+                  "ESSystemPrompt":          ESSystemPrompt,
+                  "esExecutiveSystemPrompt": ESSystemPromptStyle("executive"),
+                  "esSupportSystemPrompt":   ESSystemPromptStyle("support"),
+              }
+              const want = "respond in the same language"
+              for name, prompt := range prompts {
+                  if !strings.Contains(prompt, want) {
+                      t.Errorf("prompt %q missing language rule (expected to contain %q)", name, want)
+                  }
+              }
+          }
+        The test file already imports "strings" — add import if missing.
+      verify_passes:
+        command: "go test ./internal/agent/... -run TestAllPromptsContainLanguageRule -v"
+        expected_output: "FAIL (all 11 prompts missing language rule)"
+      commit: "test(agent): add failing test for language rule in all system prompts"
+
+  - id: 2
+    status: "pending"
+    status_note: ""
+    name: "Add language rule to BaseSystemPrompt in bigquery_handler.go"
+    description: |
+      Append rule #8 to BaseSystemPrompt in internal/agent/bigquery_handler.go.
+      The current prompt ends after rule #7 (FOR JOIN queries...). Append the new rule
+      on a new line after the backtick that ends the const.
+    spec_requirements: ["Acceptance Criteria"]
+    layer: "data"
+    action: "modify"
+    files:
+      - "internal/agent/bigquery_handler.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestAllPromptsContainLanguageRule"
+        class: "agent_test"
+        given: "BaseSystemPrompt updated with language rule"
+        when: "strings.Contains(BaseSystemPrompt, \"respond in the same language\")"
+        then: "Returns true — 1 of 11 prompts now passes"
+      verify_fails:
+        command: "go test ./internal/agent/... -run TestAllPromptsContainLanguageRule -v"
+        expected_output: "FAIL (10 remaining prompts still missing rule)"
+      write_implementation: |
+        In internal/agent/bigquery_handler.go, find the BaseSystemPrompt const ending at:
+          `7. For JOIN queries: use get_bigquery_sample_data to verify join key values match before executing`
+        Change it to:
+          `7. For JOIN queries: use get_bigquery_sample_data to verify join key values match before executing
+        8. Always respond in the same language as the user's prompt. If the user writes in Indonesian, respond in Indonesian. If in English, respond in English.`
+      verify_passes:
+        command: "go test ./internal/agent/... -run TestAllPromptsContainLanguageRule -v"
+        expected_output: "FAIL (10 remaining)"
+      commit: "fix(agent): add language rule to BQ BaseSystemPrompt"
+
+  - id: 3
+    status: "pending"
+    status_note: ""
+    name: "Update ESSystemPrompt in elasticsearch_handler.go"
+    description: |
+      Replace rule #4 ("Indonesian or English (match user's language)") and restructure:
+      keep "Interpret results" as rule #4, add explicit language rule as rule #5,
+      renumber "Focus on identifier/time range" to #6, "Maximum 100 results" to #7.
+    spec_requirements: ["Acceptance Criteria"]
+    layer: "data"
+    action: "modify"
+    files:
+      - "internal/agent/elasticsearch_handler.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestAllPromptsContainLanguageRule"
+        class: "agent_test"
+        given: "ESSystemPrompt updated with explicit language rule"
+        when: "strings.Contains(ESSystemPrompt, \"respond in the same language\")"
+        then: "Returns true — 2 of 11 prompts now pass"
+      verify_fails:
+        command: "go test ./internal/agent/... -run TestAllPromptsContainLanguageRule -v"
+        expected_output: "FAIL (9 remaining)"
+      write_implementation: |
+        In internal/agent/elasticsearch_handler.go, find the ESSystemPrompt RULES section:
+          OLD:
+            4. Interpret results and explain findings clearly in Indonesian or English (match user's language)
+            5. Focus on the specific identifier/time range provided by the user
+            6. Maximum 100 results per search
+          NEW:
+            4. Interpret results and explain findings clearly
+            5. Always respond in the same language as the user's prompt. If the user writes in Indonesian, respond in Indonesian. If in English, respond in English.
+            6. Focus on the specific identifier/time range provided by the user
+            7. Maximum 100 results per search
+      verify_passes:
+        command: "go test ./internal/agent/... -run TestAllPromptsContainLanguageRule -v"
+        expected_output: "FAIL (9 remaining)"
+      commit: "fix(agent): update ESSystemPrompt with explicit language rule"
+
+  - id: 4
+    status: "pending"
+    status_note: ""
+    name: "Add/update language rule in all 9 variant prompts in system_prompts.go"
+    description: |
+      Modify all 9 prompt constants in system_prompts.go:
+      - BQ variants (executive, technical, support): append rule #8 (same as BaseSystemPrompt)
+      - ES variants (esExecutive, esSupport): same restructure as ESSystemPrompt (Task 3)
+      - PG variants (pgExecutive, pgTechnical, pgSupport) + PGBaseSystemPrompt: append rule #10
+    spec_requirements: ["Acceptance Criteria"]
+    layer: "data"
+    action: "modify"
+    files:
+      - "internal/agent/system_prompts.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestAllPromptsContainLanguageRule"
+        class: "agent_test"
+        given: "All 9 variant prompts in system_prompts.go updated with language rule"
+        when: "strings.Contains(prompt, \"respond in the same language\") for all remaining prompts"
+        then: "Returns true for all 11 — test passes"
+      verify_fails:
+        command: "go test ./internal/agent/... -run TestAllPromptsContainLanguageRule -v"
+        expected_output: "FAIL (9 prompts still missing rule)"
+      write_implementation: |
+        For each of the 9 prompt constants in system_prompts.go:
+
+        BQ variants (executiveSystemPrompt, technicalSystemPrompt, supportSystemPrompt):
+          Each ends with the COMMUNICATION STYLE block. Append BEFORE the closing backtick:
+            8. Always respond in the same language as the user's prompt. If the user writes in Indonesian, respond in Indonesian. If in English, respond in English.
+          Insert this line AFTER the last rule line (#7) and BEFORE the blank line + "COMMUNICATION STYLE" section header.
+
+        ES variants (esExecutiveSystemPrompt, esSupportSystemPrompt):
+          Same restructure as Task 3:
+          Replace: "4. Interpret results and explain findings clearly in Indonesian or English (match user's language)"
+          With:    "4. Interpret results and explain findings clearly"
+                   "5. Always respond in the same language as the user's prompt. If the user writes in Indonesian, respond in Indonesian. If in English, respond in English."
+          Renumber: "5. Focus on..." → "6. Focus on..."
+                    "6. Maximum 100..." → "7. Maximum 100..."
+
+        PG variants (pgExecutiveSystemPrompt, pgTechnicalSystemPrompt, pgSupportSystemPrompt, PGBaseSystemPrompt):
+          Each has 9 rules. Append after rule #9:
+            10. Always respond in the same language as the user's prompt. If the user writes in Indonesian, respond in Indonesian. If in English, respond in English.
+          Insert BEFORE the blank line + "COMMUNICATION STYLE" section (for variants), or before closing backtick (for PGBaseSystemPrompt).
+      verify_passes:
+        command: "go test ./internal/agent/... -v"
+        expected_output: "ok  \tgithub.com/cortexai/cortexai/internal/agent"
+      commit: "fix(agent): add language rule to all BQ/PG/ES variant prompts"
+
+execution_order:
+  - phase: "Fix"
+    tasks: [1, 2, 3, 4]
+    notes: "Sequential. Task 1 writes the failing test. Tasks 2-4 implement prompts file by file until all 11 pass."
+
+summary:
+  total_tasks: 4
+  files_modified: 3
+  confidence: "HIGH"
+  notes: |
+    Pure string additions — no logic changes, no new dependencies.
+    All existing tests pass unchanged (they check routing/fallback, not rule content).
+    New test (Task 1) verifies the invariant: all prompts must contain language rule.

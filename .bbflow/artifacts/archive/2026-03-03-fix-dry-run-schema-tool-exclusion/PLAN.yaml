@@ -1,0 +1,156 @@
+metadata:
+  spec_id: "fix-dry-run-schema-tool-exclusion"
+  feature_name: "Fix: dry_run Schema Tool Exclusion (BQ + PG)"
+  mode: "BUGFIX"
+  complexity: "SIMPLE"
+  platform: "backend"
+  created_at: "2026-03-03T00:00:00+07:00"
+  spec_file: "BUG_REPORT.md"
+
+summary:
+  root_cause: "dry_run block only excludes execute tool; schema inspection tools remain available causing redundant get_bigquery_schema call (~2-3s wasted latency)"
+  fix_strategy: "Extend dry_run block in all 4 handler call sites to also exclude list_*_tables, get_*_schema, get_*_sample_data when dataset/database is specified (schema already injected). Retain list_*_datasets."
+  total_tasks: 3
+  confidence: "HIGH"
+  notes: >
+    TestFilterTools_DryRunWithSchemaPattern tests filterTools() directly with the new exclusion set.
+    The test passes immediately (filterTools already works), but serves as regression guard for the
+    expected tool set after the handler fix. Handler methods cannot be unit-tested without live BQ/PG.
+
+risks:
+  - id: R1
+    description: "get_bigquery_sample_data excluded on dry_run breaks JOIN preview queries"
+    level: LOW
+    mitigation: "dry_run semantics are for SQL generation only (no data access). JOIN preview is a data operation; user should use dry_run=false for that."
+
+tasks:
+  - id: 1
+    status: "pending"
+    status_note: ""
+    name: "Add TestFilterTools_DryRunWithSchemaPattern test"
+    description: >
+      Add test that verifies filterTools() with the full dry_run+schema exclusion set:
+      excluded = [execute_bigquery_sql, list_bigquery_tables, get_bigquery_schema, get_bigquery_sample_data].
+      Only list_bigquery_datasets must remain. This documents + guards the expected behavior.
+    spec_requirements: ["dry-run-bq"]
+    layer: "test"
+    action: "modify"
+    files:
+      - "internal/agent/bigquery_handler_test.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestFilterTools_DryRunWithSchemaPattern"
+        class: "bigquery_handler_test"
+        given: "all 5 BQ tools present; excludedTools = [execute_bigquery_sql, list_bigquery_tables, get_bigquery_schema, get_bigquery_sample_data]"
+        when: "filterTools(allTools, excludedTools)"
+        then: "exactly 1 tool remains; that tool is list_bigquery_datasets"
+      verify_fails:
+        command: "go test ./internal/agent/ -run TestFilterTools_DryRunWithSchemaPattern -v"
+        expected_failure: "FAIL — test does not exist yet (compile error or not found)"
+      write_implementation: >
+        Append TestFilterTools_DryRunWithSchemaPattern to bigquery_handler_test.go.
+        Use makeTools() helper to build all 5 BQ tools, pass exclusion slice simulating
+        dry_run=true + schema injected. Assert len==1 and remaining tool name is list_bigquery_datasets.
+      verify_passes:
+        command: "go test ./internal/agent/ -run TestFilterTools_DryRunWithSchemaPattern -v"
+        expected_output: "PASS"
+      commit: "test(agent): add TestFilterTools_DryRunWithSchemaPattern for dry_run+schema exclusion"
+
+  - id: 2
+    status: "pending"
+    status_note: ""
+    name: "Fix BQ Handle() and HandleStream() dry_run block"
+    description: >
+      Extend the dry_run block in BigQueryHandler.Handle() (line 248) and HandleStream() (line 419)
+      to also exclude list_bigquery_tables, get_bigquery_schema, get_bigquery_sample_data
+      when req.DatasetID != nil && *req.DatasetID != "".
+    spec_requirements: ["dry-run-bq"]
+    layer: "domain"
+    action: "modify"
+    files:
+      - "internal/agent/bigquery_handler.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "TestFilterTools_DryRunWithSchemaPattern"
+        class: "bigquery_handler_test"
+        given: "test from task 1 is already written"
+        when: "run full agent package tests"
+        then: "all tests pass including new test; no regressions"
+      verify_fails:
+        command: "go test ./internal/agent/ -v -count=1 2>&1 | grep -E 'FAIL|ok'"
+        expected_failure: "n/a — test passes before fix too; regression guard only"
+      write_implementation: >
+        In Handle() at line ~248, change:
+          if req.DryRun {
+              excludedTools = append(excludedTools, "execute_bigquery_sql")
+          }
+        To:
+          if req.DryRun {
+              excludedTools = append(excludedTools, "execute_bigquery_sql")
+              if req.DatasetID != nil && *req.DatasetID != "" {
+                  excludedTools = append(excludedTools, "list_bigquery_tables", "get_bigquery_schema", "get_bigquery_sample_data")
+              }
+          }
+        Apply identical change in HandleStream() at line ~419.
+      verify_passes:
+        command: "go test ./internal/agent/ -v -count=1 2>&1 | grep -E 'FAIL|ok'"
+        expected_output: "ok  github.com/cortexai/cortexai/internal/agent"
+      commit: "fix(agent): exclude schema inspection tools on dry_run when schema is injected (BQ)"
+
+  - id: 3
+    status: "pending"
+    status_note: ""
+    name: "Fix PG Handle() and HandleStream() dry_run block"
+    description: >
+      Extend the dry_run block in PostgresHandler.Handle() (line 193) and HandleStream() (line 378)
+      to also exclude list_postgres_tables, get_postgres_schema, get_postgres_sample_data
+      when dbName != "".
+    spec_requirements: ["dry-run-pg"]
+    layer: "domain"
+    action: "modify"
+    files:
+      - "internal/agent/postgres_handler.go"
+
+    output_contract: null
+
+    tdd_steps:
+      test_case:
+        name: "go test ./... full suite"
+        class: "all packages"
+        given: "BQ fix applied (task 2)"
+        when: "run full test suite"
+        then: "all 139+ tests pass, no regressions"
+      verify_fails:
+        command: "go test ./... -count=1 2>&1 | grep -E 'FAIL|ok'"
+        expected_failure: "n/a — all tests pass before PG fix too"
+      write_implementation: >
+        In Handle() at line ~193, change:
+          if req.DryRun {
+              excludedTools = append(excludedTools, "execute_postgres_sql")
+          }
+        To:
+          if req.DryRun {
+              excludedTools = append(excludedTools, "execute_postgres_sql")
+              if dbName != "" {
+                  excludedTools = append(excludedTools, "list_postgres_tables", "get_postgres_schema", "get_postgres_sample_data")
+              }
+          }
+        Apply identical change in HandleStream() at line ~378.
+      verify_passes:
+        command: "go test ./... -count=1 2>&1 | grep -E 'FAIL|ok'"
+        expected_output: "all packages ok"
+      commit: "fix(agent): exclude schema inspection tools on dry_run when schema is injected (PG)"
+
+execution_order:
+  - phase: 1
+    tasks: [1]
+    note: "Write test first"
+  - phase: 2
+    tasks: [2, 3]
+    note: "BQ and PG fixes are independent — can be done in either order"

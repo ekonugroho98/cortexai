@@ -1,0 +1,11 @@
+safety:
+  always_backup: true
+  require_user_confirmation: true
+  max_backups_to_keep: 5
+  backup_location: ".bbflow/backups/"
+
+strategies:
+  phase_boundary:
+    enabled: true
+  on_demand:
+    enabled: true
