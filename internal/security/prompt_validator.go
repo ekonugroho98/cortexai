@@ -49,13 +49,17 @@ var dangerousPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)popen`),
 
 	// Prompt injection
-	regexp.MustCompile(`(?i)ignore\s+(all\s+)?previous\s+instructions`),
-	regexp.MustCompile(`(?i)disregard\s+(all\s+)?previous\s+instructions`),
-	regexp.MustCompile(`(?i)forget\s+(all\s+)?previous\s+instructions`),
-	regexp.MustCompile(`(?i)override\s+(all\s+)?previous\s+instructions`),
+	regexp.MustCompile(`(?i)ignore\s+(all\s+)?(previous\s+)?instructions`),
+	regexp.MustCompile(`(?i)disregard\s+(all\s+)?(previous\s+)?instructions`),
+	regexp.MustCompile(`(?i)forget\s+(all\s+)?(previous\s+)?instructions`),
+	regexp.MustCompile(`(?i)override\s+(all\s+)?(previous\s+)?instructions`),
 	regexp.MustCompile(`(?i)new\s+context\s*:`),
 	regexp.MustCompile(`(?i)change\s+context\s*:`),
 	regexp.MustCompile(`(?i)instead\s+of\s+the\s+above`),
+	regexp.MustCompile(`(?i)act\s+as\s+(a\s+)?(different|new|another|unrestricted)`),
+	regexp.MustCompile(`(?i)you\s+are\s+now\s+(a\s+)?(different|new|another|unrestricted|jailbroken)`),
+	regexp.MustCompile(`(?i)pretend\s+(you\s+are|to\s+be)\s+`),
+	regexp.MustCompile(`(?i)reveal\s+(your\s+)?(system\s+prompt|instructions|configuration)`),
 
 	// SQL DML statements (raw mutation commands in prompt)
 	regexp.MustCompile(`(?i)^\s*DELETE\s+FROM\b`),

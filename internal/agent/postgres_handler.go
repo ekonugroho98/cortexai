@@ -146,10 +146,12 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 	// 0. Resolve pgSvc from registry
 	pgSvc := h.pgRegistry.Get(squadID)
 	if pgSvc == nil {
+		msg := fmt.Sprintf("PostgreSQL tidak dikonfigurasi untuk squad **%s**. Silakan hubungi administrator.", squadID)
 		return &models.AgentResponse{
 			Status:        "error",
 			Prompt:        req.Prompt,
 			AgentMetadata: metadata,
+			Answer:        &msg,
 		}, fmt.Errorf("PostgreSQL is not configured for squad '%s'", squadID)
 	}
 
@@ -159,10 +161,12 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 		dbName = *req.DatasetID
 	}
 	if dbName == "" {
+		msg := "Nama database diperlukan. Isi field `dataset_id` dengan nama database PostgreSQL yang ingin diquery."
 		return &models.AgentResponse{
 			Status:        "error",
 			Prompt:        req.Prompt,
 			AgentMetadata: metadata,
+			Answer:        &msg,
 		}, fmt.Errorf("database name is required (use dataset_id field)")
 	}
 	if len(allowedDatabases) > 0 && !isDatabaseAllowed(dbName, allowedDatabases) {
@@ -170,6 +174,7 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 			Status:        "error",
 			Prompt:        req.Prompt,
 			AgentMetadata: metadata,
+			Answer:        friendlyMsg("dataset_access", dbName),
 		}, fmt.Errorf("database '%s' is not accessible for your squad", dbName)
 	}
 
@@ -180,6 +185,7 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 			Status:        "error",
 			Prompt:        req.Prompt,
 			AgentMetadata: metadata,
+			Answer:        friendlyMsg("pii", kw),
 		}, fmt.Errorf("PII detected in prompt: %s", kw)
 	}
 	metadata["pii_check"] = "passed"
@@ -192,6 +198,7 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 			Status:        "error",
 			Prompt:        req.Prompt,
 			AgentMetadata: metadata,
+			Answer:        promptFriendlyMsg(vr.Message),
 		}, fmt.Errorf("prompt validation failed: %s", vr.Message)
 	}
 	metadata["prompt_validation"] = "passed"
@@ -258,6 +265,7 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 				Status:        "error",
 				Prompt:        req.Prompt,
 				AgentMetadata: metadata,
+				Answer:        sqlFriendlyMsg(errMsg),
 			}, fmt.Errorf("SQL validation failed: %s", errMsg)
 		}
 		metadata["sql_validation"] = "passed"
@@ -271,6 +279,7 @@ func (h *PostgresHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 					Status:        "error",
 					Prompt:        req.Prompt,
 					AgentMetadata: metadata,
+					Answer:        friendlyMsg("cost_exceeded", ""),
 				}, fmt.Errorf("query cost check failed: %s", costErr)
 			}
 		}

@@ -201,7 +201,6 @@ func (s *Server) setupRoutes() (http.Handler, *service.BigQueryService, *service
 	var queryH *handler.QueryHandler
 	var agentH *handler.AgentHandler
 	var cacheH *handler.CacheHandler
-	var esHandler *handler.ElasticsearchHandler
 
 	if bqSvc != nil {
 		datasetsH = handler.NewDatasetsHandler(bqSvc)
@@ -233,10 +232,6 @@ func (s *Server) setupRoutes() (http.Handler, *service.BigQueryService, *service
 		cacheH = handler.NewCacheHandler(bqAgentH, pgAgentH)
 		// FIX #1: agentH is created even if bqAgentH is nil; nil check is inside QueryAgent
 		agentH = handler.NewAgentHandler(bqAgentH, esAgentH, pgAgentH, router, llmPool, cfg.Personas)
-	}
-
-	if esSvc != nil {
-		esHandler = handler.NewElasticsearchHandler(esSvc)
 	}
 
 	// ─── Router ──────────────────────────────────────────────────────────────────
@@ -301,24 +296,6 @@ func (s *Server) setupRoutes() (http.Handler, *service.BigQueryService, *service
 					Delete("/cache/pg-schema/{squad}/{database}", cacheH.InvalidatePGSchemaCache)
 				r.With(middleware.RequireRole(models.RoleAdmin)).
 					Delete("/cache/responses", cacheH.FlushResponseCache)
-			}
-
-			// Elasticsearch
-			if esHandler != nil {
-				r.Route("/elasticsearch", func(r chi.Router) {
-					r.Get("/", esHandler.Info)
-					r.Get("/health", esHandler.Health)
-					r.Get("/cluster/info", esHandler.ClusterInfo)
-					r.Get("/cluster/health", esHandler.ClusterHealth)
-					r.Get("/indices", esHandler.ListIndices)
-					r.Get("/indices/{index_name}", esHandler.GetIndex)
-					r.With(middleware.RequireRole(models.RoleAnalyst, models.RoleAdmin)).
-						Post("/search", esHandler.Search)
-					r.With(middleware.RequireRole(models.RoleAnalyst, models.RoleAdmin)).
-						Post("/count", esHandler.Count)
-					r.With(middleware.RequireRole(models.RoleAnalyst, models.RoleAdmin)).
-						Post("/aggregate", esHandler.Aggregate)
-				})
 			}
 		})
 	})

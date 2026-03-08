@@ -250,6 +250,74 @@ func NewBigQueryHandler(
 	}
 }
 
+// friendlyMsg returns a human-readable answer string for common pipeline errors.
+// It helps users understand what went wrong and how to reformulate their request.
+func friendlyMsg(kind, detail string) *string {
+	var msg string
+	switch kind {
+	case "dataset_access":
+		msg = fmt.Sprintf("Maaf, dataset **%s** tidak dapat diakses oleh akun Anda. Silakan gunakan dataset yang sesuai dengan tim/squad Anda.", detail)
+	case "pii":
+		msg = fmt.Sprintf("Maaf, pertanyaan Anda mengandung informasi sensitif (`%s`). Mohon reformulasikan tanpa menyebutkan data pribadi seperti password, token, atau kredensial.", detail)
+	case "prompt_dml":
+		msg = "Maaf, pertanyaan Anda terlihat seperti perintah SQL langsung (DELETE/DROP/INSERT/UPDATE/ALTER). Sistem ini hanya mendukung pertanyaan dalam bahasa natural. Contoh: *\"tampilkan 10 transaksi terakhir\"* atau *\"berapa jumlah pengguna aktif hari ini\"*."
+	case "prompt_injection":
+		msg = "Maaf, pertanyaan Anda mengandung pola yang tidak diizinkan. Silakan ajukan pertanyaan yang berkaitan langsung dengan data bisnis."
+	case "prompt_empty":
+		msg = "Pertanyaan tidak boleh kosong. Silakan masukkan pertanyaan yang berkaitan dengan data, misalnya: *\"tampilkan total transaksi per bulan\"*."
+	case "prompt_too_long":
+		msg = fmt.Sprintf("Pertanyaan terlalu panjang (%s). Mohon buat pertanyaan yang lebih ringkas dan spesifik.", detail)
+	case "prompt_no_keyword":
+		msg = "Pertanyaan Anda tidak mengandung kata kunci yang berkaitan dengan data. Coba tambahkan kata seperti **tampilkan**, **hitung**, **analisis**, **berapa**, atau **show**.\n\nContoh: *\"tampilkan 5 pengemudi dengan rating tertinggi\"*."
+	case "prompt_other":
+		msg = fmt.Sprintf("Pertanyaan tidak valid: %s. Silakan reformulasikan pertanyaan Anda.", detail)
+	case "sql_not_select":
+		msg = "Maaf, saya tidak dapat mengeksekusi query tersebut karena alasan keamanan. Hanya query **SELECT** yang diizinkan — sistem tidak mengizinkan perubahan data.\n\nJika Anda ingin menganalisis data, coba: *\"tampilkan data dari tabel X\"* atau *\"hitung total Y per bulan\"*."
+	case "sql_injection":
+		msg = fmt.Sprintf("Query yang dihasilkan mengandung pola berbahaya (%s) dan tidak dapat dieksekusi. Silakan reformulasikan pertanyaan Anda.", detail)
+	case "cost_exceeded":
+		msg = "Maaf, query ini melebihi batas biaya yang diizinkan. Coba persempit scope data, misalnya dengan menambahkan filter tanggal atau membatasi jumlah baris."
+	default:
+		msg = fmt.Sprintf("Terjadi kesalahan saat memproses permintaan Anda: %s. Silakan coba lagi atau reformulasikan pertanyaan Anda.", detail)
+	}
+	return &msg
+}
+
+// promptFriendlyMsg categorizes a prompt validation error message into a friendly response.
+func promptFriendlyMsg(validationMessage string) *string {
+	msg := strings.ToLower(validationMessage)
+	switch {
+	case strings.Contains(msg, "empty"):
+		return friendlyMsg("prompt_empty", "")
+	case strings.Contains(msg, "too long"):
+		return friendlyMsg("prompt_too_long", validationMessage)
+	case strings.Contains(msg, "dangerous pattern"):
+		// Check if it's a DML pattern
+		if strings.Contains(msg, "delete") || strings.Contains(msg, "drop") ||
+			strings.Contains(msg, "insert") || strings.Contains(msg, "update") ||
+			strings.Contains(msg, "alter") || strings.Contains(msg, "truncate") ||
+			strings.Contains(msg, "create") {
+			return friendlyMsg("prompt_dml", "")
+		}
+		return friendlyMsg("prompt_injection", "")
+	case strings.Contains(msg, "instruction indicator"), strings.Contains(msg, "ignore"), strings.Contains(msg, "jailbreak"):
+		return friendlyMsg("prompt_injection", "")
+	case strings.Contains(msg, "data-related keywords"), strings.Contains(msg, "no keyword"):
+		return friendlyMsg("prompt_no_keyword", "")
+	default:
+		return friendlyMsg("prompt_other", validationMessage)
+	}
+}
+
+// sqlFriendlyMsg categorizes a SQL validation error message into a friendly response.
+func sqlFriendlyMsg(validationMessage string) *string {
+	msg := strings.ToLower(validationMessage)
+	if strings.Contains(msg, "only select") || strings.Contains(msg, "not a select") {
+		return friendlyMsg("sql_not_select", "")
+	}
+	return friendlyMsg("sql_injection", validationMessage)
+}
+
 // InvalidateSchemaCache removes the cached schema prompt for the given dataset,
 // forcing the next request to re-fetch from BigQuery.
 func (h *BigQueryHandler) InvalidateSchemaCache(datasetID string) {
@@ -282,6 +350,7 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 				Status:        "error",
 				Prompt:        req.Prompt,
 				AgentMetadata: metadata,
+				Answer:        friendlyMsg("dataset_access", *req.DatasetID),
 			}, fmt.Errorf("dataset '%s' is not accessible for your squad", *req.DatasetID)
 		}
 	}
@@ -293,6 +362,7 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 			Status:        "error",
 			Prompt:        req.Prompt,
 			AgentMetadata: metadata,
+			Answer:        friendlyMsg("pii", kw),
 		}, fmt.Errorf("PII detected in prompt: %s", kw)
 	}
 	metadata["pii_check"] = "passed"
@@ -305,6 +375,7 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 			Status:        "error",
 			Prompt:        req.Prompt,
 			AgentMetadata: metadata,
+			Answer:        promptFriendlyMsg(vr.Message),
 		}, fmt.Errorf("prompt validation failed: %s", vr.Message)
 	}
 	metadata["prompt_validation"] = "passed"
@@ -377,6 +448,7 @@ func (h *BigQueryHandler) Handle(ctx context.Context, req *models.AgentRequest, 
 				Status:        "error",
 				Prompt:        req.Prompt,
 				AgentMetadata: metadata,
+				Answer:        sqlFriendlyMsg(errMsg),
 			}, fmt.Errorf("SQL validation failed: %s", errMsg)
 		}
 		metadata["sql_validation"] = "passed"
